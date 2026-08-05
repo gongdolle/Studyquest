@@ -92,7 +92,11 @@ import type {
   InterviewTurn,
 } from "./lib/prompts";
 import { createEmptyStudyState } from "./lib/empty-seed";
-import { findPromptCompletion } from "./lib/prompt-completion";
+import {
+  COMMAND_PROMPT_PLACEHOLDER,
+  COMMAND_PROMPT_SUGGESTIONS,
+  findPromptCompletion,
+} from "./lib/prompt-completion";
 import {
   lessonPhaseName,
   localLesson,
@@ -3406,19 +3410,14 @@ function SettingsPage({
 
 function CommandDock({ onSubmit }: { onSubmit(value: string): void }) {
   const [value, setValue] = useState("");
-  const suggestions = [
-    "오늘 너무 피곤하니 각 과목을 최소 학습량으로 줄여줘.",
-    "이번 주 React를 부스트하고 다른 과목은 최소 유지로 조정해줘.",
-    "수학 때문에 원고가 막혔어. 다음 퀘스트 우선순위를 조정해줘.",
-  ];
-  const completion = findPromptCompletion(value, suggestions);
+  const completion = findPromptCompletion(value, COMMAND_PROMPT_SUGGESTIONS);
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (!value.trim()) return;
     onSubmit(value.trim());
     setValue("");
   };
-  return <form className="command-dock" onSubmit={submit}>{completion && <div className="tab-completion-hint command-completion"><kbd>Tab</kbd><span>{completion}</span></div>}<Sparkles size={17} /><input className="command-input" value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Tab" && completion && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !event.nativeEvent.isComposing) { event.preventDefault(); setValue(completion); } }} placeholder="예: 오늘 너무 피곤해 · 이번 주 React 부스트 · 수학 때문에 원고가 막혔어" /><button className="button primary icon-only" aria-label="학습 지시 보내기"><Send size={15} /></button></form>;
+  return <form className="command-dock" onSubmit={submit}>{completion && <div className="tab-completion-hint command-completion"><kbd>Tab</kbd><span>{completion}</span></div>}<Sparkles size={17} /><input className="command-input" value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Tab" && completion && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !event.nativeEvent.isComposing) { event.preventDefault(); setValue(completion); } }} placeholder={COMMAND_PROMPT_PLACEHOLDER} /><button className="button primary icon-only" aria-label="학습 지시 보내기"><Send size={15} /></button></form>;
 }
 
 function ApiProviderEditor({
