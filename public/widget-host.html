@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' blob:; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; media-src 'none'; font-src 'none'; frame-src 'none'; object-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>StudyQuest isolated widget</title>
+    <style id="base-style">
+      :root { color-scheme: light dark; font-family: Inter, "Malgun Gothic", system-ui, sans-serif; }
+      * { box-sizing: border-box; }
+      html, body { width: 100%; min-height: 100%; margin: 0; overflow-x: hidden; }
+      body { padding: 20px; background: #fff; color: #18181b; }
+      button, input, select, textarea { font: inherit; }
+      button, input, select { min-height: 38px; }
+      button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+        outline: 2px solid #2563eb; outline-offset: 2px;
+      }
+      #widget-root { width: 100%; min-height: 180px; }
+      #runtime-error { display: none; padding: 14px; border: 1px solid #fecaca; border-radius: 10px; background: #fef2f2; color: #991b1b; font-size: 13px; line-height: 1.55; }
+      @media (prefers-color-scheme: dark) {
+        body { background: #18181b; color: #f4f4f5; }
+        #runtime-error { border-color: #7f1d1d; background: #2b1719; color: #fecaca; }
+      }
+      :root[data-theme="dark"] body { background: #18181b; color: #f4f4f5; }
+      :root[data-theme="dark"] #runtime-error { border-color: #7f1d1d; background: #2b1719; color: #fecaca; }
+    </style>
+    <style id="generated-style"></style>
+  </head>
+  <body>
+    <main id="widget-root" aria-live="polite"></main>
+    <div id="runtime-error" role="alert"></div>
+    <script src="./widget-host.js"></script>
+  </body>
+</html>

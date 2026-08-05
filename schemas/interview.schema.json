@@ -1,0 +1,150 @@
+{
+  "type": "object",
+  "properties": {
+    "assistantMessage": {
+      "type": "string"
+    },
+    "readiness": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "readyForDiagnostic": {
+      "type": "boolean"
+    },
+    "subjectBlueprint": {
+      "type": "object",
+      "properties": {
+        "subjectName": { "type": "string" },
+        "role": {
+          "type": "string",
+          "enum": ["main", "support"]
+        },
+        "dailyMinutes": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 120
+        },
+        "knownSummary": { "type": "string" },
+        "unknownSummary": { "type": "string" },
+        "goal": { "type": "string" },
+        "successEvidence": { "type": "string" },
+        "skills": {
+          "type": "array",
+          "maxItems": 40,
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "prerequisites": {
+                "type": "array",
+                "maxItems": 12,
+                "items": { "type": "string" }
+              },
+              "reason": { "type": "string" }
+            },
+            "required": ["name", "prerequisites", "reason"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "subjectName",
+        "role",
+        "dailyMinutes",
+        "knownSummary",
+        "unknownSummary",
+        "goal",
+        "successEvidence",
+        "skills"
+      ],
+      "additionalProperties": false
+    },
+    "scheduleRecommendation": {
+      "type": "object",
+      "properties": {
+        "defaultReadyAt": {
+          "anyOf": [
+            { "type": "string", "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$" },
+            { "type": "null" }
+          ]
+        },
+        "learningDeadline": {
+          "anyOf": [
+            { "type": "string", "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$" },
+            { "type": "null" }
+          ]
+        },
+        "protectGameTime": {
+          "anyOf": [{ "type": "boolean" }, { "type": "null" }]
+        },
+        "gameStart": {
+          "anyOf": [
+            { "type": "string", "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$" },
+            { "type": "null" }
+          ]
+        },
+        "gameEnd": {
+          "anyOf": [
+            { "type": "string", "pattern": "^(?:(?:[01]\\d|2[0-3]):[0-5]\\d|24:00)$" },
+            { "type": "null" }
+          ]
+        },
+        "wrapUpMinutes": { "type": "integer", "minimum": 5, "maximum": 30 },
+        "maxSessionMinutes": { "type": "integer", "minimum": 15, "maximum": 60 },
+        "dayOverrides": {
+          "type": "array",
+          "maxItems": 7,
+          "items": {
+            "type": "object",
+            "properties": {
+              "weekday": {
+                "type": "string",
+                "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+              },
+              "studyEnabled": { "type": "boolean" },
+              "readyAt": {
+                "type": "string",
+                "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$"
+              },
+              "learningDeadline": {
+                "type": "string",
+                "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$"
+              },
+              "note": { "type": "string", "maxLength": 160 }
+            },
+            "required": ["weekday", "studyEnabled", "readyAt", "learningDeadline", "note"],
+            "additionalProperties": false
+          }
+        },
+        "constraintsSummary": { "type": "string", "maxLength": 500 }
+      },
+      "required": [
+        "defaultReadyAt",
+        "learningDeadline",
+        "protectGameTime",
+        "gameStart",
+        "gameEnd",
+        "wrapUpMinutes",
+        "maxSessionMinutes",
+        "dayOverrides",
+        "constraintsSummary"
+      ],
+      "additionalProperties": false
+    },
+    "followUpQuestions": {
+      "type": "array",
+      "maxItems": 1,
+      "items": { "type": "string" }
+    }
+  },
+  "required": [
+    "assistantMessage",
+    "readiness",
+    "readyForDiagnostic",
+    "subjectBlueprint",
+    "scheduleRecommendation",
+    "followUpQuestions"
+  ],
+  "additionalProperties": false
+}

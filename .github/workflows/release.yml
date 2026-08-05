@@ -1,0 +1,87 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    outputs:
+      zip: ${{ steps.archive.outputs.zip }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.18.0
+          cache: npm
+      - name: Verify tag matches package version
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $expected = "v$(node -p \"require('./package.json').version\")"
+          if ($env:GITHUB_REF_NAME -ne $expected) {
+            throw "Tag $env:GITHUB_REF_NAME does not match package version $expected."
+          }
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm test
+      - name: Stage portable app
+        run: npm run package:release
+      - name: Create ZIP and checksum
+        id: archive
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "v$(node -p \"require('./package.json').version\")-dev" }
+          $zip = "StudyQuest-$version-win-x64.zip"
+          Compress-Archive -LiteralPath "release\StudyQuest" -DestinationPath $zip -Force
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $zip" | Set-Content -LiteralPath "$zip.sha256" -Encoding ascii
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: StudyQuest-windows-x64
+          path: |
+            ${{ steps.archive.outputs.zip }}
+            ${{ steps.archive.outputs.zip }}.sha256
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: package
+    runs-on: windows-2022
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download verified build artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: StudyQuest-windows-x64
+          path: release-assets
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: release-assets/${{ needs.package.outputs.zip }}
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ZIP: ${{ needs.package.outputs.zip }}
+        run: |
+          gh release create "$env:GITHUB_REF_NAME" `
+            "release-assets/$env:RELEASE_ZIP" `
+            "release-assets/$env:RELEASE_ZIP.sha256" `
+            --verify-tag `
+            --generate-notes `
+            --title "StudyQuest $env:GITHUB_REF_NAME"

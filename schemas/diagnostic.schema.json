@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "properties": {
+    "title": { "type": "string" },
+    "overview": { "type": "string" },
+    "questions": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "properties": {
+          "concept": { "type": "string" },
+          "skillName": { "type": "string" },
+          "prompt": { "type": "string" },
+          "difficulty": { "type": "integer", "minimum": 1, "maximum": 5 },
+          "evaluationGuide": { "type": "string" }
+        },
+        "required": ["concept", "skillName", "prompt", "difficulty", "evaluationGuide"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["title", "overview", "questions"],
+  "additionalProperties": false
+}
