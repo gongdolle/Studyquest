@@ -84,6 +84,7 @@ jobs:
           gh release create "$env:GITHUB_REF_NAME" `
             "release-assets/$env:RELEASE_ZIP" `
             "release-assets/$env:RELEASE_ZIP.sha256" `
+            --repo "$env:GITHUB_REPOSITORY" `
             --verify-tag `
             --generate-notes `
             --title "StudyQuest $env:GITHUB_REF_NAME"
