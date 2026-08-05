@@ -1,7 +1,7 @@
 {
   "name": "studyquest",
   "productName": "StudyQuest",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "license": "Beerware",
   "repository": {
@@ -21,7 +21,8 @@
     "test": "vitest run",
     "desktop": "npm run build && electron .",
     "package:portable": "npm run build && node scripts/package.mjs",
-    "package:release": "npm run package:portable && node scripts/stage-release.mjs"
+    "package:release": "npm run package:portable && node scripts/stage-release.mjs && npm run verify:release",
+    "verify:release": "node scripts/verify-release.mjs"
   },
   "dependencies": {
     "@openai/codex-sdk": "0.146.0",

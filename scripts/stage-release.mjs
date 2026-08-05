@@ -1,4 +1,4 @@
-import { access, cp, mkdir, rm } from "node:fs/promises";
+import { access, cp, mkdir, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,12 +14,16 @@ if (path.dirname(stage) !== releaseRoot || path.basename(stage) !== "StudyQuest"
 
 await access(portableSource);
 await rm(stage, { recursive: true, force: true });
-await mkdir(path.join(stage, "portable"), { recursive: true });
-await mkdir(path.join(stage, "data"), { recursive: true });
+await mkdir(releaseRoot, { recursive: true });
+await cp(portableSource, stage, { recursive: true });
 
-await cp(portableSource, path.join(stage, "portable", "StudyQuest-win32-x64"), {
-  recursive: true,
-});
+// The Electron runtime and StudyQuest both ship a file named LICENSE. Preserve
+// the runtime license before placing the project license beside the executable.
+await rename(
+  path.join(stage, "LICENSE"),
+  path.join(stage, "ELECTRON-LICENSE.txt"),
+);
+await mkdir(path.join(stage, "data"), { recursive: true });
 
 for (const file of [
   "StudyQuest.cmd",

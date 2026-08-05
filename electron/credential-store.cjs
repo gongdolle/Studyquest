@@ -233,6 +233,20 @@ class CredentialStore {
     });
   }
 
+  async markUnverified(provider) {
+    provider = assertProvider(provider);
+    return this.enqueue(async () => {
+      const vault = await this.loadRaw();
+      const entry = vault.providers[provider];
+      if (!entry) return { ok: false };
+      if (Object.hasOwn(entry, 'verifiedAt')) {
+        delete entry.verifiedAt;
+        await this.writeRaw(vault);
+      }
+      return { ok: true };
+    });
+  }
+
   async remove(provider) {
     provider = assertProvider(provider);
     return this.enqueue(async () => {

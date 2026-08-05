@@ -1,4 +1,4 @@
-import { cp, mkdir, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { packager } from "@electron/packager";
@@ -17,6 +17,76 @@ process.env.TEMP = tempRoot;
 process.env.TMP = tempRoot;
 process.env.ELECTRON_CACHE = electronCache;
 
+async function directoryState(candidate) {
+  try {
+    const stats = await lstat(candidate);
+    if (!stats.isDirectory() || stats.isSymbolicLink()) {
+      throw new Error(`Expected a physical directory: ${candidate}`);
+    }
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function rehomeCodexNativePackage({ buildPath, platform, arch }) {
+  if (platform !== "win32" || arch !== "x64") {
+    throw new Error(`Unsupported StudyQuest package target: ${platform}-${arch}`);
+  }
+
+  const packageName = "codex-win32-x64";
+  const nested = path.join(
+    buildPath,
+    "node_modules",
+    "@openai",
+    "codex",
+    "node_modules",
+    "@openai",
+    packageName,
+  );
+  const hoisted = path.join(buildPath, "node_modules", "@openai", packageName);
+  const [hasNested, hasHoisted] = await Promise.all([
+    directoryState(nested),
+    directoryState(hoisted),
+  ]);
+
+  if (hasNested === hasHoisted) {
+    throw new Error(
+      `Expected exactly one Codex native package before packaging (nested=${hasNested}, hoisted=${hasHoisted}).`,
+    );
+  }
+  if (hasNested) await rename(nested, hoisted);
+
+  const packageJson = JSON.parse(await readFile(path.join(hoisted, "package.json"), "utf8"));
+  if (packageJson.name !== "@openai/codex" || packageJson.version !== "0.146.0-win32-x64") {
+    throw new Error("Unexpected Codex native package identity.");
+  }
+
+  for (const relativePath of [
+    path.join("vendor", "x86_64-pc-windows-msvc", "bin", "codex.exe"),
+    path.join("vendor", "x86_64-pc-windows-msvc", "bin", "codex-code-mode-host.exe"),
+    path.join("vendor", "x86_64-pc-windows-msvc", "codex-path", "rg.exe"),
+    path.join(
+      "vendor",
+      "x86_64-pc-windows-msvc",
+      "codex-resources",
+      "codex-command-runner.exe",
+    ),
+    path.join(
+      "vendor",
+      "x86_64-pc-windows-msvc",
+      "codex-resources",
+      "codex-windows-sandbox-setup.exe",
+    ),
+  ]) {
+    const stats = await lstat(path.join(hoisted, relativePath));
+    if (!stats.isFile() || stats.isSymbolicLink()) {
+      throw new Error(`Codex native resource is not a physical file: ${relativePath}`);
+    }
+  }
+}
+
 const appPaths = await packager({
   dir: root,
   name: "StudyQuest",
@@ -26,6 +96,7 @@ const appPaths = await packager({
   out,
   overwrite: true,
   prune: true,
+  afterPrune: [rehomeCodexNativePackage],
   asar: { unpack: "**/{.**,**}/**/*.exe" },
   ignore: [
     /^\/(?:\.cache|\.tmp|\.config|\.npm-global|\.github|data|docs|portable|release|src|scripts)(?:\/|$)/,

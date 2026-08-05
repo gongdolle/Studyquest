@@ -440,6 +440,7 @@ function registerIpcHandlers() {
     assertNoCredentialFields(state);
     return stateStore.save(state);
   });
+  handle('studyquest:state:preserve-for-recovery', async () => stateStore.preserveForRecovery());
   handle('studyquest:files:pick-documents', async () => pickDocuments());
   handle('studyquest:ai:status', async () => aiProviders.status());
   handle('studyquest:ai:invoke', async (request) => aiProviders.invoke(request));

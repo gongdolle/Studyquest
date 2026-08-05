@@ -10,6 +10,7 @@ const CHANNELS = Object.freeze({
   runtimeUseAutomaticCli: 'studyquest:runtime:use-automatic-cli',
   stateLoad: 'studyquest:state:load',
   stateSave: 'studyquest:state:save',
+  statePreserveForRecovery: 'studyquest:state:preserve-for-recovery',
   pickDocuments: 'studyquest:files:pick-documents',
   providerStatus: 'studyquest:ai:status',
   aiInvoke: 'studyquest:ai:invoke',
@@ -44,6 +45,7 @@ const bridge = Object.freeze({
   state: Object.freeze({
     load: () => ipcRenderer.invoke(CHANNELS.stateLoad),
     save: (state) => ipcRenderer.invoke(CHANNELS.stateSave, state),
+    preserveForRecovery: () => ipcRenderer.invoke(CHANNELS.statePreserveForRecovery),
   }),
   files: Object.freeze({
     pickDocuments: () => ipcRenderer.invoke(CHANNELS.pickDocuments),

@@ -22,7 +22,7 @@ StudyQuest의 Windows x64 포터블 빌드는 다음 OpenAI 구성요소를 포�
 | `@openai/codex` Windows x64 native package | `0.146.0-win32-x64` | Apache-2.0 | 게시 패키지에 별도 파일 없음; 위 SDK 패키지의 Apache-2.0 원문이 배포에 포함됨 |
 
 Codex 실행 파일은 Electron이 실행할 수 있도록
-`resources/app.asar.unpacked/node_modules/@openai/codex/` 아래에 풀린 상태로
+`resources/app.asar.unpacked/node_modules/@openai/codex-win32-x64/` 아래에 풀린 상태로
 포함됩니다. `@openai/codex-sdk/LICENSE` 원문은 `resources/app.asar` 안에 함께
 포함됩니다. OpenAI 및 Codex 명칭은 해당 구성요소를 식별하기 위한 것이며,
 StudyQuest 자체의 라이선스나 보증을 뜻하지 않습니다.
@@ -34,8 +34,8 @@ Electron은 개발 의존성이지만 완성된 데스크톱 실행 파일의 �
 
 | 구성요소 | 버전 | 고지 위치 |
 | --- | --- | --- |
-| Electron | `43.2.0` | `portable/StudyQuest-win32-x64/LICENSE` |
-| Chromium 및 Electron이 재배포하는 제3자 구성요소 | Electron `43.2.0`에 포함된 버전 | `portable/StudyQuest-win32-x64/LICENSES.chromium.html` |
+| Electron | `43.2.0` | `ELECTRON-LICENSE.txt` |
+| Chromium 및 Electron이 재배포하는 제3자 구성요소 | Electron `43.2.0`에 포함된 버전 | `LICENSES.chromium.html` |
 
 위 두 파일은 Electron 패키징 결과물의 루트에 그대로 포함됩니다. Chromium 관련
 구성요소는 여러 라이선스를 사용하므로 이 문서에서 하나의 라이선스로 축약하지
@@ -107,6 +107,6 @@ Electron은 개발 의존성이지만 완성된 데스크톱 실행 파일의 �
 
 ## 확인 기준
 
-이 목록은 StudyQuest `0.1.2`의 Windows x64 production 설치 트리를 기준으로 합니다.
+이 목록은 StudyQuest `0.1.3`의 Windows x64 production 설치 트리를 기준으로 합니다.
 의존성을 변경하면 실제 배포 트리와 패키지에 포함된 원문을 다시 확인해 이 문서도
 함께 갱신해야 합니다.

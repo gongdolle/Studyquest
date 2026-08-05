@@ -36,7 +36,7 @@ jobs:
         run: npm ci
       - name: Run tests
         run: npm test
-      - name: Stage portable app
+      - name: Stage and verify portable app
         run: npm run package:release
       - name: Create ZIP and checksum
         id: archive

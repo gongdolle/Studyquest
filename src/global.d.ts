@@ -31,6 +31,7 @@ declare global {
     prompt: string;
     schemaName: "diagnostic" | "curriculum" | "lesson" | "evaluation" | "interview";
     timeoutMs?: number;
+    requestId?: string;
   }
 
   interface AIInvokeResult {
@@ -47,6 +48,7 @@ declare global {
       costUsd?: number;
       durationMs?: number;
     };
+    errorCode?: string;
     error?: string;
   }
 
@@ -82,6 +84,7 @@ declare global {
     state: {
       load<T>(): Promise<T | null>;
       save<T>(state: T): Promise<{ ok: boolean }>;
+      preserveForRecovery(): Promise<{ ok: boolean; backupPath: string | null }>;
     };
     files: {
       pickDocuments(): Promise<Array<{
@@ -112,6 +115,7 @@ declare global {
         provider?: APIProviderId;
         model?: string;
         verifiedAt?: string;
+        errorCode?: string;
         error?: string;
       }>;
     };

@@ -148,6 +148,8 @@ function createProvider(fetchImpl: ReturnType<typeof vi.fn>, models: Partial<Rec
         deepseek: "deepseek-v4-flash",
       } as Record<string, string>)[provider],
     })),
+    markVerified: vi.fn(async () => ({ verifiedAt: "2026-08-05T00:00:00.000Z" })),
+    markUnverified: vi.fn(async () => ({ ok: true })),
   };
   const providers = new AIProviders({
     portableRoot: process.cwd(),
@@ -173,6 +175,9 @@ function createClaudeCapabilityProcess(supportsBare = true) {
     }
     if (args[0] === "--help") {
       return { stdout: supportsBare ? "Usage: claude [options]\n  --bare  Run without local configuration" : "Usage: claude [options]", stderr: "", code: 0 };
+    }
+    if (args[0] === "login" && args[1] === "status") {
+      return { stdout: "Logged in using ChatGPT", stderr: "", code: 0 };
     }
     throw new Error(`Unexpected CLI probe: ${args.join(" ")}`);
   });
@@ -333,7 +338,31 @@ describe("CLI executable overrides", () => {
     expect(status.codex.source).not.toContain("@openai/codex-sdk");
   });
 
-  it("enables the Claude Agent executable only when the saved Anthropic key is usable", async () => {
+  it("keeps an installed Codex CLI unavailable until its login is verified", async () => {
+    const executable = path.resolve(process.execPath);
+    const runProcessImpl = vi.fn(async ({ args }: { args: string[] }) => {
+      if (args[0] === "--version") {
+        return { stdout: "codex-cli 0.146.0", stderr: "", code: 0 };
+      }
+      if (args[0] === "login" && args[1] === "status") {
+        throw new Error("Not logged in");
+      }
+      throw new Error(`Unexpected Codex probe: ${args.join(" ")}`);
+    });
+    const providers = createCliOverrideProvider({ codex: executable }, runProcessImpl);
+
+    const inspected = await providers.inspectCodex();
+
+    expect(inspected.public).toMatchObject({
+      available: false,
+      source: executable,
+      version: "codex-cli 0.146.0",
+    });
+    expect(inspected.public.reason).toContain("codex login");
+    expect(runProcessImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("enables the Claude Agent executable only when the saved Anthropic key is verified", async () => {
     const executable = path.resolve(process.execPath);
     const providers = new AIProviders({
       portableRoot: process.cwd(),
@@ -342,7 +371,12 @@ describe("CLI executable overrides", () => {
       credentialStore: {
         status: vi.fn(async () => ({
           providers: {
-            anthropic: { configured: true, decryptable: true, model: "claude-sonnet-5" },
+            anthropic: {
+              configured: true,
+              decryptable: true,
+              model: "claude-sonnet-5",
+              verifiedAt: "2026-08-05T00:00:00.000Z",
+            },
           },
         })),
       },
@@ -360,6 +394,39 @@ describe("CLI executable overrides", () => {
       source: executable,
     });
     expect(status.claude.reason).toBeUndefined();
+  });
+
+  it("keeps saved API credentials unavailable until their connection test succeeds", async () => {
+    const providers = new AIProviders({
+      portableRoot: process.cwd(),
+      dataRoot: path.join(process.cwd(), ".tmp", "unverified-api-status"),
+      schemasRoot: path.join(process.cwd(), "schemas"),
+      credentialStore: {
+        status: vi.fn(async () => ({
+          providers: {
+            openai: { configured: true, decryptable: true, model: "gpt-5.6-terra" },
+            deepseek: {
+              configured: true,
+              decryptable: true,
+              model: "deepseek-v4-flash",
+              verifiedAt: "2026-08-05T00:00:00.000Z",
+            },
+          },
+        })),
+      },
+      fetchImpl: vi.fn(),
+    });
+    providers.inspectCodex = vi.fn(async () => ({ public: { available: false } }));
+    providers.inspectClaude = vi.fn(async () => ({ public: { available: false } }));
+
+    const status = await providers.status();
+
+    expect(status.openai).toMatchObject({ available: false, configured: true, decryptable: true });
+    expect(status.openai.reason).toContain("연결 확인");
+    expect(status.deepseek).toMatchObject({
+      available: true,
+      verifiedAt: "2026-08-05T00:00:00.000Z",
+    });
   });
 
   it("fails closed when an approved Claude CLI does not support bare mode", async () => {
@@ -562,7 +629,7 @@ describe("API provider routing", () => {
 
     expect(result).toMatchObject({ ok: true, provider: "claude", data: lesson });
     expect(credentialStore.get).toHaveBeenCalledWith("anthropic");
-    expect(runProcessImpl).toHaveBeenCalledTimes(3);
+    expect(runProcessImpl).toHaveBeenCalledTimes(1);
     const processInput = runProcessImpl.mock.calls.find(([input]) => input.args.includes("--print"))?.[0];
     expect(processInput).toBeDefined();
     expect(processInput.args).toEqual(expect.arrayContaining([
@@ -575,9 +642,7 @@ describe("API provider routing", () => {
     expect(processInput.env.ANTHROPIC_API_KEY).toBe("test-explicit-anthropic-secret");
     expect(processInput.env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
     expect(processInput.env.CLAUDE_CONFIG_DIR).toBe(path.join(dataRoot, "providers", "claude-api-key-only"));
-    for (const [probeInput] of runProcessImpl.mock.calls.filter(([input]) => input.args[0] === "--version" || input.args[0] === "--help")) {
-      expect(probeInput.env.ANTHROPIC_API_KEY).toBeUndefined();
-    }
+    expect(runProcessImpl.mock.calls.some(([input]) => input.args[0] === "--version" || input.args[0] === "--help")).toBe(false);
     expect(JSON.stringify(result)).not.toContain("test-explicit-anthropic-secret");
   });
 
@@ -650,6 +715,52 @@ describe("API provider routing", () => {
     expect(JSON.stringify(result)).not.toContain(apiKey);
   });
 
+  it("classifies Claude CLI authentication failures and clears stale verification", async () => {
+    for (const mode of ["process", "result"] as const) {
+      const runProcessImpl = mode === "process"
+        ? vi.fn(async () => {
+            const error = new Error("Error 401: invalid Anthropic API key") as Error & { code: string };
+            error.code = "provider_failed";
+            throw error;
+          })
+        : vi.fn(async () => ({
+            stdout: JSON.stringify({ type: "result", is_error: true, result: "Unauthorized: API key is expired" }),
+            stderr: "",
+            code: 0,
+          }));
+      const credentialStore = {
+        get: vi.fn(async () => ({ apiKey: "test-expired-anthropic-secret", model: "claude-sonnet-5" })),
+        markUnverified: vi.fn(async () => ({ ok: true })),
+      };
+      const providers = new AIProviders({
+        portableRoot: process.cwd(),
+        dataRoot: path.join(process.cwd(), ".tmp", `claude-auth-${mode}`),
+        schemasRoot: path.join(process.cwd(), "schemas"),
+        credentialStore,
+        fetchImpl: vi.fn(),
+        runProcessImpl,
+      });
+      providers.inspectProviders = vi.fn(async () => ({
+        claude: { public: { available: true }, executable: path.resolve(process.execPath) },
+      }));
+
+      const result = await providers.invoke({
+        provider: "claude",
+        operation: "lesson",
+        schemaName: "lesson",
+        prompt: "teach me",
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        provider: "claude",
+        errorCode: "authentication_failed",
+      });
+      expect(credentialStore.markUnverified).toHaveBeenCalledWith("anthropic");
+      expect(JSON.stringify(result)).not.toContain("test-expired-anthropic-secret");
+    }
+  });
+
   it("never routes automatic requests through a local Claude executable", async () => {
     const fetchImpl = vi.fn();
     const { providers, credentialStore } = createProvider(fetchImpl);
@@ -717,6 +828,127 @@ describe("API provider routing", () => {
     expect(fetchImpl.mock.calls[0][0]).toBe("https://api.deepseek.com/chat/completions");
   });
 
+  it("retries one transient empty DeepSeek JSON response and accounts for both attempts", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(response({
+        choices: [{ finish_reason: "stop", message: { content: "" } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      }))
+      .mockResolvedValueOnce(response({
+        choices: [{ finish_reason: "stop", message: { content: JSON.stringify(lesson) } }],
+        usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
+      }));
+    const { providers } = createProvider(fetchImpl);
+
+    const result = await providers.invoke({
+      provider: "deepseek",
+      operation: "lesson",
+      schemaName: "lesson",
+      prompt: "teach me",
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      provider: "deepseek",
+      usage: { inputTokens: 30, outputTokens: 15, totalTokens: 45 },
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const retryBody = JSON.parse(fetchImpl.mock.calls[1][1].body as string);
+    expect(retryBody.messages[0].content).toContain("one automatic retry");
+  });
+
+  it("returns DeepSeek model and response-format errors with safe provider detail", async () => {
+    const apiKey = "test-deepseek-secret-value";
+    const fetchImpl = vi.fn(async () => response({
+      error: {
+        message: `Model does not support response_format for key ${apiKey}`,
+        type: "invalid_request_error",
+        code: "invalid_response_format",
+      },
+    }, 422));
+    const { providers, credentialStore } = createProvider(fetchImpl);
+    credentialStore.get.mockResolvedValue({ apiKey, model: "deepseek-v4-flash" });
+
+    const result = await providers.invoke({
+      provider: "deepseek",
+      operation: "lesson",
+      schemaName: "lesson",
+      prompt: "teach me",
+    });
+
+    expect(result).toMatchObject({ ok: false, provider: "deepseek", errorCode: "response_format_unsupported" });
+    expect(result.error).toContain("deepseek-v4-flash");
+    expect(result.error).toContain("response format");
+    expect(JSON.stringify(result)).not.toContain(apiKey);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("distinguishes truncated DeepSeek output without spending tokens on a same-provider retry", async () => {
+    const fetchImpl = vi.fn(async () => response({
+      choices: [{ finish_reason: "length", message: { content: "{\"title\":" } }],
+      usage: { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 },
+    }));
+    const { providers } = createProvider(fetchImpl);
+
+    const result = await providers.invoke({
+      provider: "deepseek",
+      operation: "lesson",
+      schemaName: "lesson",
+      prompt: "teach me",
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      provider: "deepseek",
+      errorCode: "output_limit",
+      usage: { inputTokens: 12, outputTokens: 8, totalTokens: 20 },
+    });
+    expect(result.error).toContain("token limit");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("verifies that the configured DeepSeek model is present in the official model list", async () => {
+    const fetchImpl = vi.fn(async () => response({
+      object: "list",
+      data: [{ id: "deepseek-v4-pro", object: "model", owned_by: "deepseek" }],
+    }));
+    const { providers, credentialStore } = createProvider(fetchImpl);
+
+    const result = await providers.testApi("deepseek");
+
+    expect(result).toMatchObject({ ok: false, errorCode: "model_unavailable" });
+    expect(result.error).toContain("deepseek-v4-flash");
+    expect(result.error).toContain("deepseek-v4-pro");
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://api.deepseek.com/models",
+      expect.objectContaining({ method: "GET", redirect: "error" }),
+    );
+    expect(credentialStore.markVerified).not.toHaveBeenCalled();
+    expect(credentialStore.markUnverified).toHaveBeenCalledWith("deepseek");
+  });
+
+  it("marks a DeepSeek connection verified only after its selected model is listed", async () => {
+    const fetchImpl = vi.fn(async () => response({
+      object: "list",
+      data: [
+        { id: "deepseek-v4-flash", object: "model", owned_by: "deepseek" },
+        { id: "deepseek-v4-pro", object: "model", owned_by: "deepseek" },
+      ],
+    }));
+    const { providers, credentialStore } = createProvider(fetchImpl);
+
+    const result = await providers.testApi("deepseek");
+
+    expect(result).toMatchObject({
+      ok: true,
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      verifiedAt: "2026-08-05T00:00:00.000Z",
+    });
+    expect(credentialStore.markVerified).toHaveBeenCalledWith("deepseek");
+  });
+
   it("falls through an unauthenticated installed CLI in automatic mode", async () => {
     const fetchImpl = vi.fn(async () => response({ output_text: JSON.stringify(lesson) }));
     const { providers } = createProvider(fetchImpl);
@@ -764,8 +996,78 @@ describe("API provider routing", () => {
     });
 
     expect(result).toMatchObject({ ok: true, provider: "openai", data: lesson });
-    expect(providers.invokeCodexCli).toHaveBeenCalledTimes(1);
+    expect(providers.invokeCodexCli).toHaveBeenCalledTimes(2);
+    expect(providers.invokeCodexCli.mock.calls[1][1].structuredRetry).toBe(true);
     expect(providers.invokeApi).toHaveBeenCalledTimes(1);
+  });
+
+  it("limits a direct provider to one structured retry and reports all observed token usage", async () => {
+    const fetchImpl = vi.fn();
+    const { providers } = createProvider(fetchImpl);
+    providers.invokeApi = vi
+      .fn()
+      .mockResolvedValueOnce({
+        text: "not JSON",
+        data: undefined,
+        usage: { inputTokens: 11, outputTokens: 4, totalTokens: 15 },
+      })
+      .mockResolvedValueOnce({
+        text: JSON.stringify({ title: "incomplete lesson" }),
+        data: { title: "incomplete lesson" },
+        usage: { inputTokens: 13, outputTokens: 6, totalTokens: 19 },
+      });
+
+    const result = await providers.invoke({
+      provider: "openai",
+      operation: "lesson",
+      schemaName: "lesson",
+      prompt: "teach me",
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      provider: "openai",
+      errorCode: "invalid_output",
+      usage: { inputTokens: 24, outputTokens: 10, totalTokens: 34 },
+    });
+    expect(providers.invokeApi).toHaveBeenCalledTimes(2);
+    expect(providers.invokeApi.mock.calls[0][1].structuredRetry).toBe(false);
+    expect(providers.invokeApi.mock.calls[1][1].structuredRetry).toBe(true);
+  });
+
+  it("stops before a structured retry or automatic fallback when the request is cancelled", async () => {
+    const fetchImpl = vi.fn();
+    const { providers } = createProvider(fetchImpl);
+    const requestId = "b846d403-ae71-4ec7-873f-852d5f8fcb66";
+    providers.inspectProviders = vi.fn(async () => ({
+      codex: { public: { available: true }, executable: "codex.exe" },
+      claude: { public: { available: false } },
+      openai: { public: { available: true }, transport: "api" },
+      anthropic: { public: { available: false } },
+      deepseek: { public: { available: false } },
+    }));
+    providers.invokeCodexCli = vi.fn(async () => {
+      expect(providers.cancel(requestId)).toEqual({ ok: true });
+      return { text: "not JSON", data: undefined, usage: { inputTokens: 7, outputTokens: 3 } };
+    });
+    providers.invokeApi = vi.fn();
+
+    const result = await providers.invoke({
+      requestId,
+      provider: "auto",
+      operation: "lesson",
+      schemaName: "lesson",
+      prompt: "teach me",
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      provider: "codex",
+      errorCode: "cancelled",
+      usage: { inputTokens: 7, outputTokens: 3 },
+    });
+    expect(providers.invokeCodexCli).toHaveBeenCalledTimes(1);
+    expect(providers.invokeApi).not.toHaveBeenCalled();
   });
 
   it("supports memory-only WebM transcription and redacts authentication failures", async () => {
@@ -773,7 +1075,7 @@ describe("API provider routing", () => {
       .fn()
       .mockResolvedValueOnce(response({ text: "I would like to explain this idea." }))
       .mockResolvedValueOnce(response({ error: "bad key" }, 401));
-    const { providers } = createProvider(fetchImpl);
+    const { providers, credentialStore } = createProvider(fetchImpl);
     const transcription = await providers.transcribe({
       bytes: new Uint8Array(128).buffer,
       mimeType: "audio/webm;codecs=opus",
@@ -783,6 +1085,7 @@ describe("API provider routing", () => {
 
     const failed = await providers.invoke({ provider: "openai", operation: "lesson", schemaName: "lesson", prompt: "teach me" });
     expect(failed).toMatchObject({ ok: false, error: "API key authentication failed." });
+    expect(credentialStore.markUnverified).toHaveBeenCalledWith("openai");
     expect(JSON.stringify(failed)).not.toContain("super-secret");
   });
 });

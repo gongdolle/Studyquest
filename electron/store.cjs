@@ -180,6 +180,24 @@ class AtomicJsonStore {
       }
     });
   }
+
+  async preserveForRecovery() {
+    return this.enqueue(async () => {
+      let stats;
+      try {
+        stats = await fs.promises.lstat(this.filePath);
+      } catch (error) {
+        if (error?.code === 'ENOENT') return { ok: true, backupPath: null };
+        throw error;
+      }
+      if (!stats.isFile() || stats.isSymbolicLink()) {
+        throw new Error('State path is not a physical file and cannot be backed up safely.');
+      }
+      const backupPath = `${this.filePath}.recovery-${Date.now()}-${crypto.randomUUID()}.bak`;
+      await renameWithRetry(this.filePath, backupPath);
+      return { ok: true, backupPath };
+    });
+  }
 }
 
 function createJsonStore(filePath, options) {

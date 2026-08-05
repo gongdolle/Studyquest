@@ -8,7 +8,9 @@ const { CredentialStore } = require("./credential-store.cjs") as {
   CredentialStore: new (options: { filePath: string; safeStorage: FakeSafeStorage }) => {
     set(input: { provider: string; apiKey: string; model: string }): Promise<{ ok: boolean }>;
     get(provider: string): Promise<{ apiKey: string; model: string }>;
-    status(): Promise<{ encryptionAvailable: boolean; providers: Record<string, { configured: boolean; decryptable: boolean; needsReconnect: boolean }> }>;
+    status(): Promise<{ encryptionAvailable: boolean; providers: Record<string, { configured: boolean; decryptable: boolean; needsReconnect: boolean; verifiedAt?: string }> }>;
+    markVerified(provider: string): Promise<{ ok: boolean; verifiedAt?: string }>;
+    markUnverified(provider: string): Promise<{ ok: boolean }>;
     remove(provider: string): Promise<{ ok: boolean }>;
   };
 };
@@ -84,5 +86,19 @@ describe("CredentialStore", () => {
     const status = await store.status();
     expect(status.providers.openai.configured).toBe(false);
     expect(status.providers.deepseek.decryptable).toBe(true);
+  });
+
+  it("clears stale verification without deleting the encrypted credential", async () => {
+    const { store } = await fixture();
+    await store.set({ provider: "openai", apiKey: "test-openai-secret-123", model: "gpt-5.6-terra" });
+    await store.markVerified("openai");
+    expect((await store.status()).providers.openai.verifiedAt).toBeTruthy();
+
+    await store.markUnverified("openai");
+
+    const status = await store.status();
+    expect(status.providers.openai).toMatchObject({ configured: true, decryptable: true });
+    expect(status.providers.openai.verifiedAt).toBeUndefined();
+    await expect(store.get("openai")).resolves.toMatchObject({ model: "gpt-5.6-terra" });
   });
 });

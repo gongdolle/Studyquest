@@ -36,6 +36,7 @@ import {
   Trash2,
   Upload,
   WandSparkles,
+  X,
   Zap,
 } from "lucide-react";
 import {
@@ -91,6 +92,7 @@ import type {
   InterviewTurn,
 } from "./lib/prompts";
 import { createEmptyStudyState } from "./lib/empty-seed";
+import { findPromptCompletion } from "./lib/prompt-completion";
 import {
   lessonPhaseName,
   localLesson,
@@ -132,6 +134,13 @@ interface TokenUsageEntry {
   costUsd: number;
 }
 
+interface ErrorLogEntry {
+  id: string;
+  at: string;
+  title: string;
+  message: string;
+}
+
 interface ImportedDocument {
   id: string;
   subjectId: string;
@@ -154,11 +163,13 @@ interface AppEnvelope {
   importedDocuments: ImportedDocument[];
   interview: InterviewState;
   usage: TokenUsageEntry[];
+  errorLog: ErrorLogEntry[];
   preferences: {
     provider: AIProviderPreference;
     monthlyTokenBudget: number;
     protectGameTime: boolean;
     theme: "light" | "dark";
+    setupCompleted: boolean;
   };
 }
 
@@ -316,7 +327,7 @@ type AIEvaluationPayload = EvaluationPayload;
 type DiagnosticAnswerMap = Record<string, { text: string }>;
 
 interface ToastState {
-  id: number;
+  id: string;
   kind: "success" | "error";
   title: string;
   message: string;
@@ -325,6 +336,7 @@ interface ToastState {
 interface BusyState {
   label: string;
   detail: string;
+  requestId: string;
 }
 
 const localIsoDate = () => {
@@ -360,6 +372,25 @@ const formatDate = (value: string, withYear = false) =>
     weekday: "short",
   }).format(new Date(`${value}T12:00:00`));
 
+const formatErrorTimestamp = (value: string) => {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "시간 정보 없음";
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+};
+
+const normalizeErrorLogText = (value: unknown, fallback: string, maxLength: number) => {
+  const normalized = String(value ?? "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, maxLength);
+  return normalized || fallback;
+};
+
 const subjectStyle = (subject: Subject) =>
   ({ "--subject-color": subjectColor(subject) }) as CSSProperties;
 
@@ -381,14 +412,42 @@ const providerLabel = (provider: AIProviderId) => providerLabels[provider];
 const aiFailureMessage = (result: AIInvokeResult): string => {
   const provider = providerLabel(result.provider);
   const message = result.error?.trim() || "AI 생성에 실패했습니다.";
-  if (/structured object|outside the required schema|invalid JSON output/i.test(message)) {
-    return `${provider} 응답 형식을 자동 복구하지 못했습니다. 방금 입력은 유지되었습니다. 같은 내용을 다시 보내 재시도하거나 설정에서 다른 AI를 선택해 주세요.`;
+  const reference = result.errorCode
+    ? `\n오류 코드: ${result.errorCode} · 요청 ID: ${result.requestId}`
+    : `\n요청 ID: ${result.requestId}`;
+  if (result.errorCode === "invalid_output" || /structured object|outside the required schema|invalid JSON(?: output)?/i.test(message)) {
+    return `${provider} 응답 형식을 한 번 자동 재시도했지만 복구하지 못했습니다. 입력은 그대로 유지되었습니다. 다시 시도하거나 다른 AI를 선택해 주세요.${reference}`;
   }
-  if (/timed out|timeout/i.test(message)) {
-    return `${provider} 응답이 제한 시간 안에 도착하지 않아 중단했습니다. 방금 입력은 유지되었습니다. 잠시 후 다시 시도하거나 설정에서 다른 AI를 선택해 주세요.`;
+  if (result.errorCode === "timeout" || /timed out|timeout/i.test(message)) {
+    return `${provider} 응답이 제한 시간 안에 도착하지 않아 중단했습니다. 입력은 그대로 유지되었습니다. 잠시 후 다시 시도하거나 다른 AI를 선택해 주세요.${reference}`;
   }
-  return `${provider}: ${message}`;
+  if (result.errorCode === "cancelled") {
+    return `${provider} 요청을 취소했습니다. 입력은 그대로 유지되었습니다.${reference}`;
+  }
+  if (["model_unavailable", "response_format_unsupported", "invalid_request"].includes(result.errorCode ?? "")) {
+    return `${provider} 모델 또는 API 형식을 확인해 주세요. ${message}${reference}`;
+  }
+  return `${provider}: ${message}${reference}`;
 };
+
+const providerIsReady = (
+  provider: AIProviderId,
+  status: ProviderStatus,
+): boolean => {
+  if (provider === "codex") return status.codex.available;
+  if (provider === "claude") {
+    return status.claude.available && Boolean(status.anthropic.verifiedAt);
+  }
+  return status[provider].available && Boolean(status[provider].verifiedAt);
+};
+
+const preferenceIsReady = (
+  preference: AIProviderPreference,
+  status: ProviderStatus,
+): boolean => preference === "auto"
+  ? (["codex", "openai", "anthropic", "deepseek"] as const)
+      .some((provider) => providerIsReady(provider, status))
+  : providerIsReady(preference, status);
 
 const createInitialInterview = (): InterviewState => ({
   status: "idle",
@@ -417,11 +476,13 @@ const createInitialEnvelope = (): AppEnvelope => {
     importedDocuments: [],
     interview: createInitialInterview(),
     usage: [],
+    errorLog: [],
     preferences: {
       provider: "auto",
       monthlyTokenBudget: 1_000_000,
       protectGameTime: true,
       theme: "light",
+      setupCompleted: false,
     },
   };
 };
@@ -535,7 +596,7 @@ const createReadmeDemoEnvelope = (): AppEnvelope => {
     interview: {
       ...createInitialInterview(),
       status: "idle",
-      readiness: 100,
+      readiness: 1,
     },
     usage: [{
       id: "demo-usage",
@@ -547,6 +608,10 @@ const createReadmeDemoEnvelope = (): AppEnvelope => {
       outputTokens: 2_600,
       costUsd: 0,
     }],
+    preferences: {
+      ...createInitialEnvelope().preferences,
+      setupCompleted: true,
+    },
   };
 };
 
@@ -566,6 +631,14 @@ const hydrateEnvelope = (value: unknown): AppEnvelope => {
   }, today);
   const scheduleWindow = resolveScheduleWindow(learning.schedulePolicy, today);
   const savedCheckInIsToday = candidate.checkIn?.date === today;
+  const inferredSetupCompleted = typeof candidate.preferences?.setupCompleted === "boolean"
+    ? candidate.preferences.setupCompleted
+    : Boolean(
+        candidate.learning.subjects.length
+        || candidate.interview?.status !== "idle"
+        || candidate.usage?.length,
+      );
+  const savedErrorLog = Array.isArray(candidate.errorLog) ? candidate.errorLog : [];
   return {
     ...initial,
     ...candidate,
@@ -579,6 +652,19 @@ const hydrateEnvelope = (value: unknown): AppEnvelope => {
       extractionStatus: document.extractionStatus ?? "unsupported",
     })),
     usage: candidate.usage ?? [],
+    errorLog: savedErrorLog
+      .filter((entry) => entry && typeof entry === "object")
+      .map((entry) => {
+        const rawTimestamp = String(entry.at ?? "");
+        const timestamp = new Date(rawTimestamp);
+        return {
+          id: normalizeErrorLogText(entry.id, uid("error"), 160),
+          at: Number.isFinite(timestamp.getTime()) ? timestamp.toISOString() : new Date().toISOString(),
+          title: normalizeErrorLogText(entry.title, "오류", 160),
+          message: normalizeErrorLogText(entry.message, "상세 내용이 없습니다.", 2_400),
+        };
+      })
+      .slice(-50),
     interview: {
       ...createInitialInterview(),
       ...(candidate.interview ?? {}),
@@ -600,6 +686,7 @@ const hydrateEnvelope = (value: unknown): AppEnvelope => {
         ? candidate.preferences?.provider ?? "auto"
         : "auto",
       theme: candidate.preferences?.theme === "dark" ? "dark" : "light",
+      setupCompleted: inferredSetupCompleted,
     },
     checkIn: {
       ...initial.checkIn,
@@ -753,8 +840,13 @@ export default function App() {
   const [view, setView] = useState<ViewId>("onboarding");
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [providerStatus, setProviderStatus] = useState<ProviderStatus>(blankStatus);
+  const [providersLoaded, setProvidersLoaded] = useState(false);
   const [busy, setBusy] = useState<BusyState | null>(null);
   const [toasts, setToasts] = useState<ToastState[]>([]);
+  const [stateLoadError, setStateLoadError] = useState<string | null>(null);
+  const [stateRecoveryFailure, setStateRecoveryFailure] = useState("");
+  const [stateRecoveryPending, setStateRecoveryPending] = useState(false);
+  const stateSaveErrorShown = useRef(false);
 
   useLayoutEffect(() => {
     const theme = envelope?.preferences.theme ?? "light";
@@ -763,12 +855,23 @@ export default function App() {
   }, [envelope?.preferences.theme]);
 
   const notify = useCallback((kind: ToastState["kind"], title: string, message: string) => {
-    const toast: ToastState = { id: Date.now(), kind, title, message };
+    const safeTitle = normalizeErrorLogText(title, kind === "error" ? "오류" : "알림", 160);
+    const safeMessage = normalizeErrorLogText(message, "상세 내용이 없습니다.", 2_400);
+    const toast: ToastState = { id: uid("toast"), kind, title: safeTitle, message: safeMessage };
     setToasts((current) => [...current.slice(-2), toast]);
-    window.setTimeout(
-      () => setToasts((current) => current.filter((item) => item.id !== toast.id)),
-      4_200,
-    );
+    if (kind === "error") {
+      setEnvelope((current) => current ? {
+        ...current,
+        errorLog: [
+          ...current.errorLog,
+          { id: uid("error"), at: new Date().toISOString(), title: safeTitle, message: safeMessage },
+        ].slice(-50),
+      } : current);
+      return;
+    }
+    window.setTimeout(() => {
+      setToasts((current) => current.filter((item) => item.id !== toast.id));
+    }, 5_200);
   }, []);
 
   useEffect(() => {
@@ -790,8 +893,15 @@ export default function App() {
               ? "today"
               : "onboarding",
         );
-      } catch {
-        if (active) setEnvelope(createInitialEnvelope());
+      } catch (error) {
+        if (active) {
+          setEnvelope(createInitialEnvelope());
+          setStateLoadError(normalizeErrorLogText(
+            error instanceof Error ? error.message : error,
+            "저장된 학습 상태를 읽지 못했습니다.",
+            2_400,
+          ));
+        }
       } finally {
         if (active) setLoaded(true);
       }
@@ -804,7 +914,10 @@ export default function App() {
         if (active) {
           setRuntime(runtimeInfo);
           setProviderStatus(status);
+          setProvidersLoaded(true);
         }
+      } else if (active) {
+        setProvidersLoaded(true);
       }
     })();
     return () => {
@@ -813,16 +926,38 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!loaded || !envelope || isReadmeDemo()) return;
+    if (!loaded || !envelope || stateLoadError || isReadmeDemo()) return;
     const timer = window.setTimeout(() => {
+      const reportSaveFailure = (error: unknown) => {
+        if (stateSaveErrorShown.current) return;
+        stateSaveErrorShown.current = true;
+        const toast: ToastState = {
+          id: uid("toast"),
+          kind: "error",
+          title: "학습 상태 저장 실패",
+          message: normalizeErrorLogText(
+            error instanceof Error ? error.message : error,
+            "데이터 폴더에 쓸 수 있는지 확인해 주세요.",
+            2_400,
+          ),
+        };
+        setToasts((current) => [...current.slice(-2), toast]);
+      };
       if (window.studyQuest) {
-        void window.studyQuest.state.save(envelope);
+        void window.studyQuest.state.save(envelope)
+          .then(() => { stateSaveErrorShown.current = false; })
+          .catch(reportSaveFailure);
       } else {
-        localStorage.setItem("studyquest-state", JSON.stringify(envelope));
+        try {
+          localStorage.setItem("studyquest-state", JSON.stringify(envelope));
+          stateSaveErrorShown.current = false;
+        } catch (error) {
+          reportSaveFailure(error);
+        }
       }
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [envelope, loaded]);
+  }, [envelope, loaded, stateLoadError]);
 
   useEffect(() => {
     if (!loaded) return;
@@ -855,8 +990,68 @@ export default function App() {
 
   const refreshProviders = useCallback(async () => {
     if (!window.studyQuest) return;
-    setProviderStatus(await window.studyQuest.ai.status());
+    try {
+      setProviderStatus(await window.studyQuest.ai.status());
+      setProvidersLoaded(true);
+    } catch (error) {
+      notify("error", "AI 연결 상태 확인 실패", error instanceof Error ? error.message : String(error));
+    }
+  }, [notify]);
+
+  const requireAIConnection = useCallback((): void => {
+    if (!window.studyQuest) {
+      throw new Error("StudyQuest 데스크톱 앱에서 AI 연결을 먼저 설정해 주세요.");
+    }
+    const preference = envelope?.preferences.provider ?? "auto";
+    if (preferenceIsReady(preference, providerStatus)) return;
+    setEnvelope((current) => current ? {
+      ...current,
+      preferences: { ...current.preferences, setupCompleted: false },
+    } : current);
+    throw new Error(
+      preference === "auto"
+        ? "사용 가능한 AI가 없습니다. Codex CLI 로그인을 확인하거나 개인 API를 연결하면 입력한 내용 그대로 학습을 시작할 수 있습니다."
+        : `${preference === "claude" ? "Claude Agent" : providerLabel(preference)} 연결을 사용할 수 없습니다. 초기 설정에서 연결을 다시 확인해 주세요.`,
+    );
+  }, [envelope?.preferences.provider, providerStatus]);
+
+  const dismissToast = useCallback((toastId: string) => {
+    setToasts((current) => current.filter((toast) => toast.id !== toastId));
   }, []);
+
+  const recoverStateAfterBackup = useCallback(async () => {
+    if (stateRecoveryPending) return;
+    setStateRecoveryPending(true);
+    setStateRecoveryFailure("");
+    try {
+      let backupPath: string | null = null;
+      if (window.studyQuest) {
+        const result = await window.studyQuest.state.preserveForRecovery();
+        if (!result.ok) throw new Error("기존 상태 파일을 백업하지 못했습니다.");
+        backupPath = result.backupPath;
+      } else {
+        localStorage.removeItem("studyquest-state");
+      }
+      setEnvelope(createInitialEnvelope());
+      setView("onboarding");
+      setStateLoadError(null);
+      notify(
+        "success",
+        "새 학습 상태를 준비했습니다",
+        backupPath
+          ? `읽지 못한 원본은 삭제하지 않고 다음 위치에 보관했습니다: ${backupPath}`
+          : "기존 상태 파일이 없어 빈 학습 상태로 시작합니다.",
+      );
+    } catch (error) {
+      setStateRecoveryFailure(normalizeErrorLogText(
+        error instanceof Error ? error.message : error,
+        "복구 준비에 실패했습니다. 데이터 폴더 권한을 확인해 주세요.",
+        2_400,
+      ));
+    } finally {
+      setStateRecoveryPending(false);
+    }
+  }, [notify, stateRecoveryPending]);
 
   if (!envelope) {
     return (
@@ -866,6 +1061,59 @@ export default function App() {
           <strong>StudyQuest를 깨우는 중</strong>
           <p>포터블 폴더의 학습 상태와 스킬 그래프를 불러오고 있습니다.</p>
         </div>
+      </div>
+    );
+  }
+
+  if (stateLoadError) {
+    return (
+      <>
+        <StateRecoveryPage
+          error={stateLoadError}
+          dataRoot={runtime?.dataRoot}
+          pending={stateRecoveryPending}
+          recoveryFailure={stateRecoveryFailure}
+          onRetry={() => window.location.reload()}
+          onRecover={() => void recoverStateAfterBackup()}
+        />
+        <ToastStack toasts={toasts} onDismiss={dismissToast} />
+      </>
+    );
+  }
+
+  if (!providersLoaded && !isReadmeDemo()) {
+    return (
+      <div className="loading-overlay">
+        <div className="loading-card">
+          <div className="spinner" />
+          <strong>AI 연결 상태를 확인하고 있습니다</strong>
+          <span>Codex 로그인과 저장된 개인 API를 안전하게 점검합니다.</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isReadmeDemo() && !envelope.preferences.setupCompleted) {
+    return (
+      <div className="first-run-root" data-theme={envelope.preferences.theme}>
+        <FirstRunSetupPage
+          envelope={envelope}
+          runtime={runtime}
+          providerStatus={providerStatus}
+          onRefreshProviders={refreshProviders}
+          onUpdatePreferences={(preferences) => setEnvelope((current) => current ? {
+            ...current,
+            preferences,
+          } : current)}
+          onComplete={() => {
+            setEnvelope((current) => current ? {
+              ...current,
+              preferences: { ...current.preferences, setupCompleted: true },
+            } : current);
+            setView("onboarding");
+          }}
+        />
+        <ToastStack toasts={toasts} onDismiss={dismissToast} />
       </div>
     );
   }
@@ -911,11 +1159,28 @@ export default function App() {
     label: string,
     validator?: (value: unknown) => value is T,
   ): Promise<{ payload: T; result: AIInvokeResult }> => {
+    requireAIConnection();
     if (!window.studyQuest) throw new Error("데스크톱 AI 브리지를 사용할 수 없습니다.");
+    const requestId = crypto.randomUUID();
     setBusy({
       label,
       detail: "AI 응답을 기다린 뒤 데이터 구조를 검증하고 있습니다. 보통 20~60초이며 복잡한 작업이나 서비스 혼잡 시 더 걸릴 수 있습니다.",
+      requestId,
     });
+    const progressTimers = [
+      window.setTimeout(() => setBusy((current) => current?.requestId === requestId ? {
+        ...current,
+        detail: "AI가 학습 요청을 분석하고 구조화된 응답을 작성하고 있습니다. 입력 내용은 앱에 보존되어 있습니다.",
+      } : current), 20_000),
+      window.setTimeout(() => setBusy((current) => current?.requestId === requestId ? {
+        ...current,
+        detail: "응답 구조를 검증하고 있습니다. 형식이 맞지 않으면 같은 AI에 한 번 자동 재시도한 뒤 연결된 다른 AI로 전환합니다.",
+      } : current), 55_000),
+      window.setTimeout(() => setBusy((current) => current?.requestId === requestId ? {
+        ...current,
+        detail: "서비스 혼잡으로 평소보다 오래 걸리고 있습니다. 기다리거나 아래 버튼으로 안전하게 취소할 수 있습니다.",
+      } : current), 110_000),
+    ];
     try {
       const result = await window.studyQuest.ai.invoke({
         provider: envelope.preferences.provider,
@@ -923,28 +1188,75 @@ export default function App() {
         prompt,
         schemaName,
         timeoutMs: 240_000,
+        requestId,
       });
-      if (!result.ok) throw new Error(aiFailureMessage(result));
+      const observedTokens = (result.usage?.inputTokens ?? 0) + (result.usage?.outputTokens ?? 0);
+      if (observedTokens > 0 || (result.usage?.costUsd ?? 0) > 0) {
+        commit((current) => ({
+          ...current,
+          usage: [
+            ...current.usage,
+            {
+              id: uid("usage"),
+              at: new Date().toISOString(),
+              provider: result.provider,
+              operation,
+              inputTokens: result.usage?.inputTokens ?? 0,
+              cachedInputTokens: result.usage?.cachedInputTokens ?? 0,
+              outputTokens: result.usage?.outputTokens ?? 0,
+              costUsd: result.usage?.costUsd ?? 0,
+            },
+          ],
+        }));
+      }
+      if (!result.ok) {
+        const connectionInvalidated = [
+          "authentication_failed",
+          "access_denied",
+          "insufficient_balance",
+          "model_unavailable",
+          "invalid_request",
+          "response_format_unsupported",
+        ].includes(result.errorCode ?? "") || (
+          result.errorCode === "provider_unavailable"
+          && /no ai provider is connected|login|not configured|not approved|executable|api key/i.test(result.error ?? "")
+        );
+        if (connectionInvalidated) {
+          const staleReason = "이 연결은 다시 확인해야 합니다. 키·모델·권한을 점검한 뒤 연결 확인을 실행해 주세요.";
+          setProviderStatus((current) => {
+            const staleProbe = (probe: ProviderProbe): ProviderProbe => ({
+              ...probe,
+              available: false,
+              verifiedAt: undefined,
+              reason: staleReason,
+            });
+            if (result.provider === "claude") {
+              return {
+                ...current,
+                claude: staleProbe(current.claude),
+                anthropic: staleProbe(current.anthropic),
+                checkedAt: new Date().toISOString(),
+              };
+            }
+            return {
+              ...current,
+              [result.provider]: staleProbe(current[result.provider]),
+              checkedAt: new Date().toISOString(),
+            };
+          });
+          void refreshProviders();
+          commit((current) => ({
+            ...current,
+            preferences: { ...current.preferences, setupCompleted: false },
+          }));
+        }
+        throw new Error(aiFailureMessage(result));
+      }
       const payload = extractStructuredData<T>(result, validator);
-      commit((current) => ({
-        ...current,
-        usage: [
-          ...current.usage,
-          {
-            id: uid("usage"),
-            at: new Date().toISOString(),
-            provider: result.provider,
-            operation,
-            inputTokens: result.usage?.inputTokens ?? 0,
-            cachedInputTokens: result.usage?.cachedInputTokens ?? 0,
-            outputTokens: result.usage?.outputTokens ?? 0,
-            costUsd: result.usage?.costUsd ?? 0,
-          },
-        ],
-      }));
       return { payload, result };
     } finally {
-      setBusy(null);
+      progressTimers.forEach((timer) => window.clearTimeout(timer));
+      setBusy((current) => current?.requestId === requestId ? null : current);
     }
   };
 
@@ -1092,9 +1404,9 @@ export default function App() {
     };
   };
 
-  const sendInterviewMessage = async (rawText: string) => {
+  const sendInterviewMessage = async (rawText: string): Promise<boolean> => {
     const content = rawText.trim();
-    if (!content) return;
+    if (!content) return false;
     const userMessage: InterviewMessage = {
       id: uid("interview-message"),
       role: "user",
@@ -1104,15 +1416,6 @@ export default function App() {
       role,
       content: text,
     }));
-    commit((current) => ({
-      ...current,
-      interview: {
-        ...current.interview,
-        status: "interview",
-        messages: [...current.interview.messages, userMessage],
-      },
-    }));
-
     try {
       const scheduleConfigured = learning.schedulePolicy.configuredBy === "ai-interview"
         || learning.schedulePolicy.configuredBy === "manual";
@@ -1205,12 +1508,14 @@ export default function App() {
             readiness: clampUnit(payload.readiness),
             blueprint: payload.subjectBlueprint,
             scheduleRecommendation: payload.scheduleRecommendation,
-            messages: [...current.interview.messages, assistantMessage],
+            messages: [...current.interview.messages, userMessage, assistantMessage],
           },
         };
       });
+      return true;
     } catch (error) {
       notify("error", "과목 등록 대화 생성 실패", error instanceof Error ? error.message : String(error));
+      return false;
     }
   };
 
@@ -1773,8 +2078,17 @@ export default function App() {
   };
 
   const resetState = () => {
-    const next = createInitialEnvelope();
-    setEnvelope(next);
+    setEnvelope((current) => {
+      const next = createInitialEnvelope();
+      return current ? {
+        ...next,
+        errorLog: current.errorLog,
+        preferences: {
+          ...current.preferences,
+          setupCompleted: true,
+        },
+      } : next;
+    });
     setView("onboarding");
     notify("success", "학습 상태를 비웠습니다", "등록 과목 없이 새 학습 과목 등록 화면으로 돌아왔습니다.");
   };
@@ -1999,6 +2313,11 @@ export default function App() {
               providerStatus={providerStatus}
               onRefreshProviders={refreshProviders}
               onUpdatePreferences={(preferences) => commit((current) => ({ ...current, preferences }))}
+              onOpenSetup={() => commit((current) => ({
+                ...current,
+                preferences: { ...current.preferences, setupCompleted: false },
+              }))}
+              onClearErrorLog={() => commit((current) => ({ ...current, errorLog: [] }))}
               onReset={resetState}
             />
           )}
@@ -2007,14 +2326,7 @@ export default function App() {
         {view !== "onboarding" && view !== "settings" && view !== "lesson" && <CommandDock onSubmit={handleCommand} />}
       </main>
 
-      <div className="toast-stack" aria-live="polite">
-        {toasts.map((toast) => (
-          <div key={toast.id} className={`toast ${toast.kind}`}>
-            {toast.kind === "success" ? <CheckCircle2 size={17} /> : <CircleAlert size={17} />}
-            <div><strong>{toast.title}</strong><span>{toast.message}</span></div>
-          </div>
-        ))}
-      </div>
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
       {busy && (
         <div className="loading-overlay">
@@ -2022,10 +2334,266 @@ export default function App() {
             <div className="spinner" />
             <strong>{busy.label}</strong>
             <p>{busy.detail}</p>
+            <button
+              className="button"
+              onClick={() => {
+                setBusy((current) => current ? { ...current, detail: "취소 요청을 보내고 있습니다…" } : current);
+                void window.studyQuest?.ai.cancel(busy.requestId);
+              }}
+            >
+              요청 취소
+            </button>
           </div>
         </div>
       )}
     </div>
+  );
+}
+
+function ToastStack({
+  toasts,
+  onDismiss,
+}: {
+  toasts: readonly ToastState[];
+  onDismiss(toastId: string): void;
+}) {
+  return (
+    <div className="toast-stack" aria-live="polite">
+      {toasts.map((toast) => (
+        <div
+          key={toast.id}
+          className={`toast ${toast.kind}`}
+          role={toast.kind === "error" ? "alert" : "status"}
+        >
+          {toast.kind === "success" ? <CheckCircle2 size={17} /> : <CircleAlert size={17} />}
+          <div><strong>{toast.title}</strong><span>{toast.message}</span></div>
+          <button
+            type="button"
+            className="toast-close"
+            aria-label={`${toast.title} 알림 닫기`}
+            onClick={() => onDismiss(toast.id)}
+          >
+            <X size={15} />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function StateRecoveryPage({
+  error,
+  dataRoot,
+  pending,
+  recoveryFailure,
+  onRetry,
+  onRecover,
+}: {
+  error: string;
+  dataRoot?: string;
+  pending: boolean;
+  recoveryFailure: string;
+  onRetry(): void;
+  onRecover(): void;
+}) {
+  return (
+    <main className="first-run-page">
+      <section className="first-run-shell state-recovery-shell">
+        <header className="first-run-header">
+          <div className="brand setup-brand">
+            <div className="brand-mark"><BrainCircuit size={21} /></div>
+            <div className="brand-copy"><strong>StudyQuest</strong><span>상태 파일 복구</span></div>
+          </div>
+          <span className="tag coral"><ShieldCheck size={13} /> 원본 보호 중</span>
+        </header>
+        <div className="first-run-body">
+          <div className="setup-step state-recovery-step">
+            <div className="state-recovery-mark"><CircleAlert size={28} /></div>
+            <span className="eyebrow">Safe recovery</span>
+            <h1>학습 파일을 바로 덮어쓰지 않았습니다.</h1>
+            <p>저장된 JSON을 읽는 중 문제가 생겨 자동 저장을 멈췄습니다. 다시 읽거나, 원본을 별도 백업 파일로 보존한 뒤 빈 상태로 시작할 수 있습니다.</p>
+            <div className="setup-panel state-recovery-detail">
+              <strong>읽기 오류</strong>
+              <p>{error}</p>
+              <strong>데이터 폴더</strong>
+              <p className="mono">{dataRoot ?? "현재 StudyQuest 데이터 폴더"}</p>
+            </div>
+            {recoveryFailure && <p className="setup-message error" role="alert">{recoveryFailure}</p>}
+          </div>
+        </div>
+        <footer className="first-run-footer">
+          <span>백업 버튼을 누르기 전에는 기존 파일을 이동하거나 삭제하지 않습니다.</span>
+          <div className="button-row">
+            <button className="button" disabled={pending} onClick={onRetry}><RefreshCw size={14} /> 다시 읽기</button>
+            <button className="button primary" disabled={pending} onClick={onRecover}><ShieldCheck size={14} /> {pending ? "원본 백업 중…" : "원본 백업 후 새로 시작"}</button>
+          </div>
+        </footer>
+      </section>
+    </main>
+  );
+}
+
+function FirstRunSetupPage({
+  envelope,
+  runtime,
+  providerStatus,
+  onRefreshProviders,
+  onUpdatePreferences,
+  onComplete,
+}: {
+  envelope: AppEnvelope;
+  runtime: RuntimeInfo | null;
+  providerStatus: ProviderStatus;
+  onRefreshProviders(): Promise<void>;
+  onUpdatePreferences(preferences: AppEnvelope["preferences"]): void;
+  onComplete(): void;
+}) {
+  const [step, setStep] = useState(0);
+  const [runtimeAction, setRuntimeAction] = useState("");
+  const [runtimeMessage, setRuntimeMessage] = useState("");
+  const readyProviders = (["codex", "claude", "openai", "anthropic", "deepseek"] as const)
+    .filter((provider) => providerIsReady(provider, providerStatus));
+  const hasReadyProvider = readyProviders.length > 0;
+  const selectedProviderReady = preferenceIsReady(envelope.preferences.provider, providerStatus);
+
+  const configureRuntime = async (
+    action: string,
+    request: () => Promise<RuntimeConfigurationResult>,
+  ) => {
+    if (!window.studyQuest || runtimeAction) return;
+    setRuntimeAction(action);
+    setRuntimeMessage("");
+    try {
+      const result = await request();
+      if (result.canceled) return;
+      if (!result.ok) {
+        setRuntimeMessage(result.error || "설정을 저장하지 못했습니다.");
+        return;
+      }
+      setRuntimeMessage(result.restarting
+        ? "설정을 저장했습니다. 적용을 위해 앱을 다시 시작합니다."
+        : "설정을 저장했습니다.");
+      if (!result.restarting) await onRefreshProviders();
+    } catch (error) {
+      setRuntimeMessage(error instanceof Error ? error.message : "설정을 저장하지 못했습니다.");
+    } finally {
+      setRuntimeAction("");
+    }
+  };
+
+  const nextFromConnections = () => {
+    if (!hasReadyProvider) return;
+    if (!selectedProviderReady) {
+      onUpdatePreferences({ ...envelope.preferences, provider: "auto" });
+    }
+    setStep(2);
+  };
+
+  return (
+    <main className="first-run-page">
+      <section className="first-run-shell">
+        <header className="first-run-header">
+          <div className="brand setup-brand">
+            <div className="brand-mark"><BrainCircuit size={21} /></div>
+            <div className="brand-copy"><strong>StudyQuest</strong><span>첫 실행 설정</span></div>
+          </div>
+          <div className="setup-progress" aria-label={`초기 설정 ${step + 1}/3 단계`}>
+            {["내 폴더", "AI 연결", "시작 확인"].map((label, index) => (
+              <div className={index <= step ? "is-active" : ""} key={label}>
+                <span>{index + 1}</span><b>{label}</b>
+              </div>
+            ))}
+          </div>
+        </header>
+
+        <div className="first-run-body">
+          {step === 0 && (
+            <div className="setup-step">
+              <span className="eyebrow">Portable first</span>
+              <h1>학습을 시작하기 전에<br />내 저장 위치부터 확인할게요.</h1>
+              <p>Windows 시스템 폴더는 건드리지 않습니다. 기본값은 압축을 푼 StudyQuest 폴더 안의 <code>data</code>이며, 앱 폴더를 지우면 함께 정리할 수 있습니다.</p>
+              <div className="setup-grid">
+                <div className="setup-panel">
+                  <strong><Database size={16} /> 현재 데이터 저장 위치</strong>
+                  <p className="mono">{runtime?.dataRoot ?? "앱 폴더\\data"}</p>
+                  <span className={`tag ${runtime?.dataRootIsDefault !== false ? "mint" : "violet"}`}>{runtime?.dataRootIsDefault !== false ? "앱 내부 기본값" : "사용자 지정"}</span>
+                  <div className="button-row section-gap">
+                    <button className="button" disabled={Boolean(runtimeAction)} onClick={() => void configureRuntime("data-root", () => window.studyQuest!.runtime.pickDataRoot())}><FolderOpen size={14} /> 다른 폴더 선택</button>
+                    {runtime?.dataRootIsDefault === false && <button className="button" disabled={Boolean(runtimeAction)} onClick={() => void configureRuntime("data-default", () => window.studyQuest!.runtime.useDefaultDataRoot())}><RotateCcw size={14} /> 기본값</button>}
+                  </div>
+                </div>
+                <div className="setup-panel">
+                  <strong><Sun size={16} /> 화면 모드</strong>
+                  <p>지금 선택하고 나중에 설정에서 언제든 바꿀 수 있습니다.</p>
+                  <div className="button-row section-gap">
+                    <button className={`button${envelope.preferences.theme === "light" ? " primary" : ""}`} onClick={() => onUpdatePreferences({ ...envelope.preferences, theme: "light" })}><Sun size={14} /> 라이트</button>
+                    <button className={`button${envelope.preferences.theme === "dark" ? " primary" : ""}`} onClick={() => onUpdatePreferences({ ...envelope.preferences, theme: "dark" })}><Moon size={14} /> 다크</button>
+                  </div>
+                </div>
+              </div>
+              {runtimeMessage && <p className="setup-message" role="status">{runtimeMessage}</p>}
+            </div>
+          )}
+
+          {step === 1 && (
+            <div className="setup-step setup-connections">
+              <span className="eyebrow">Bring your own AI</span>
+              <h1>학습을 만들 AI를<br />하나 이상 연결해 주세요.</h1>
+              <p>로그인된 Codex CLI가 확인되면 API 키 없이 사용할 수 있습니다. 개인 API는 자동 장애 전환용으로 함께 연결할 수 있으며, 키는 이 Windows 사용자에게 묶어 암호화합니다.</p>
+              <div className={`connection-gate ${hasReadyProvider ? "is-ready" : ""}`}>
+                {hasReadyProvider ? <CheckCircle2 size={18} /> : <CircleAlert size={18} />}
+                <div><strong>{hasReadyProvider ? `${readyProviders.map(providerLabel).join(", ")} 준비 완료` : "아직 검증된 AI 연결이 없습니다"}</strong><span>{hasReadyProvider ? "다음 단계에서 사용할 라우팅을 확인합니다." : "Codex 로그인을 확인하거나 아래에서 개인 API를 저장하고 연결 확인을 완료하세요."}</span></div>
+                <button className="button" onClick={() => void onRefreshProviders()}><RefreshCw size={14} /> 다시 확인</button>
+              </div>
+              <div className="setup-cli-grid">
+                <div>
+                  <ProviderCard name="Codex CLI" status={providerStatus.codex} icon={<SquareTerminal size={15} />} />
+                  {!providerStatus.codex.available && <p className="field-hint">설치되어 있다면 터미널에서 <code>codex login</code> 후 다시 확인하세요.</p>}
+                  <div className="button-row section-gap"><button className="button" disabled={Boolean(runtimeAction)} onClick={() => void configureRuntime("codex", () => window.studyQuest!.runtime.pickCliExecutable("codex"))}><FolderOpen size={14} /> Codex 경로 선택</button></div>
+                </div>
+                <div>
+                  <ProviderCard name="Claude Agent (선택)" status={providerStatus.claude} icon={<SquareTerminal size={15} />} />
+                  <p className="field-hint">Claude Agent는 승인한 실행 파일과 검증된 Anthropic API 키가 모두 필요합니다.</p>
+                  <div className="button-row section-gap"><button className="button" disabled={Boolean(runtimeAction)} onClick={() => void configureRuntime("claude", () => window.studyQuest!.runtime.pickCliExecutable("claude"))}><FolderOpen size={14} /> 실행 파일 승인</button></div>
+                </div>
+              </div>
+              <div className="setup-api-grid">
+                <ApiProviderEditor provider="openai" name="OpenAI" defaultModel="gpt-5.6-terra" status={providerStatus.openai} onChanged={onRefreshProviders} />
+                <ApiProviderEditor provider="anthropic" name="Anthropic" defaultModel="claude-sonnet-5" status={providerStatus.anthropic} onChanged={onRefreshProviders} />
+                <ApiProviderEditor provider="deepseek" name="DeepSeek" defaultModel="deepseek-v4-flash" status={providerStatus.deepseek} onChanged={onRefreshProviders} />
+              </div>
+              {runtimeMessage && <p className="setup-message" role="status">{runtimeMessage}</p>}
+            </div>
+          )}
+
+          {step === 2 && (
+            <div className="setup-step setup-ready">
+              <div className="setup-ready-mark"><CheckCircle2 size={28} /></div>
+              <span className="eyebrow">Ready to learn</span>
+              <h1>연결 준비가 끝났습니다.</h1>
+              <p>이제 과목과 도달 목표를 대화로 확인하고, 퇴근 시간·학습 종료·게임 시간까지 조사한 뒤 현재 수준 테스트를 만듭니다.</p>
+              <label className="field setup-route"><span>기본 AI 라우팅</span><select className="select" value={envelope.preferences.provider} onChange={(event) => onUpdatePreferences({ ...envelope.preferences, provider: event.target.value as AIProviderPreference })}><option value="auto">자동 라우팅 · 권장</option>{readyProviders.map((provider) => <option value={provider} key={provider}>{providerLabel(provider)}</option>)}</select></label>
+              <div className="setup-summary">
+                <div><Database size={16} /><span>학습 데이터</span><strong>{runtime?.dataRootIsDefault !== false ? "앱 내부 저장" : "사용자 지정 폴더"}</strong></div>
+                <div><BrainCircuit size={16} /><span>사용 가능한 AI</span><strong>{readyProviders.length}개</strong></div>
+                <div><Clock3 size={16} /><span>생활 시간표</span><strong>첫 과목 대화에서 확인</strong></div>
+              </div>
+              {!selectedProviderReady && <p className="setup-message error" role="alert">선택한 AI를 현재 사용할 수 없습니다. 자동 라우팅이나 준비 완료된 AI를 선택해 주세요.</p>}
+            </div>
+          )}
+        </div>
+
+        <footer className="first-run-footer">
+          <span>{step === 0 ? "설정은 모두 나중에 다시 바꿀 수 있습니다." : step === 1 ? "API 키를 앱 제작자에게 보내지 않습니다." : "다음은 학습 과목 인터뷰입니다."}</span>
+          <div className="button-row">
+            {step > 0 && <button className="button" onClick={() => setStep((current) => current - 1)}>이전</button>}
+            {step === 0 && <button className="button primary" onClick={() => setStep(1)}>AI 연결 확인 <ChevronRight size={15} /></button>}
+            {step === 1 && <button className="button primary" disabled={!hasReadyProvider} onClick={nextFromConnections}>연결 사용하기 <ChevronRight size={15} /></button>}
+            {step === 2 && <button className="button primary" disabled={!selectedProviderReady} onClick={onComplete}>과목 등록 시작 <ChevronRight size={15} /></button>}
+          </div>
+        </footer>
+      </section>
+    </main>
   );
 }
 
@@ -2046,7 +2614,7 @@ function OnboardingPage({
   schedulePolicy: StudyQuestState["schedulePolicy"];
   protectGameTime: boolean;
   providerStatus: ProviderStatus;
-  onSend(value: string): Promise<void>;
+  onSend(value: string): Promise<boolean>;
   onStartDiagnostic(): Promise<void>;
   onUpdateAnswer(questionId: string, answer: string): void;
   onCompleteDiagnostic(): Promise<void>;
@@ -2071,13 +2639,6 @@ function OnboardingPage({
   const overrideCount = scheduleDraft?.dayOverrides.length ?? schedulePolicy.dayOverrides?.length ?? 0;
   const readyToComplete = Boolean(interview.questions.length)
     && interview.questions.every((question) => interview.answers[question.id]?.trim());
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    const value = draft.trim();
-    if (!value) return;
-    setDraft("");
-    void onSend(value);
-  };
   const templates = [
     {
       label: "과목 + 도달 수준",
@@ -2092,6 +2653,15 @@ function OnboardingPage({
       value: "___를 공부해서 핵심 개념을 설명하고 ___에 적용할 수 있을 때까지 배우고 싶어.",
     },
   ];
+  const completion = findPromptCompletion(draft, templates.map((template) => template.value));
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    const value = draft.trim();
+    if (!value) return;
+    void onSend(value).then((accepted) => {
+      if (accepted) setDraft("");
+    });
+  };
 
   useEffect(() => {
     const thread = threadRef.current;
@@ -2231,10 +2801,24 @@ function OnboardingPage({
 
         {interview.status !== "diagnostic" && (
           <form className="chat-composer" onSubmit={submit}>
+            {completion && <div className="tab-completion-hint"><kbd>Tab</kbd><span>{completion}</span></div>}
             <textarea
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={(event) => {
+                if (
+                  event.key === "Tab"
+                  && completion
+                  && !event.shiftKey
+                  && !event.ctrlKey
+                  && !event.altKey
+                  && !event.metaKey
+                  && !event.nativeEvent.isComposing
+                ) {
+                  event.preventDefault();
+                  setDraft(completion);
+                  return;
+                }
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
                   event.currentTarget.form?.requestSubmit();
@@ -2718,6 +3302,8 @@ function SettingsPage({
   providerStatus,
   onRefreshProviders,
   onUpdatePreferences,
+  onOpenSetup,
+  onClearErrorLog,
   onReset,
 }: {
   envelope: AppEnvelope;
@@ -2725,6 +3311,8 @@ function SettingsPage({
   providerStatus: ProviderStatus;
   onRefreshProviders(): Promise<void>;
   onUpdatePreferences(preferences: AppEnvelope["preferences"]): void;
+  onOpenSetup(): void;
+  onClearErrorLog(): void;
   onReset(): void;
 }) {
   const tokens = envelope.usage.reduce((total, item) => total + item.inputTokens + item.outputTokens, 0);
@@ -2757,7 +3345,7 @@ function SettingsPage({
   };
   return (
     <section className="page settings-page">
-      <div className="page-header"><div><span className="eyebrow">Portable & private</span><h1>에이전트는 교체해도,<br />학습 상태는 내 폴더에.</h1><p>AI 대화가 원본이 아니라 포터블 폴더의 구조화된 스킬 그래프가 원본입니다.</p></div><button className="button" onClick={onRefreshProviders}><RefreshCw size={14} /> 연결 다시 확인</button></div>
+      <div className="page-header"><div><span className="eyebrow">Portable & private</span><h1>에이전트는 교체해도,<br />학습 상태는 내 폴더에.</h1><p>AI 대화가 원본이 아니라 포터블 폴더의 구조화된 스킬 그래프가 원본입니다.</p></div><div className="button-row"><button className="button" onClick={onOpenSetup}><Sparkles size={14} /> 초기 연결 다시 열기</button><button className="button" onClick={onRefreshProviders}><RefreshCw size={14} /> 연결 다시 확인</button></div></div>
       <div className="card settings-list">
         <div className="settings-row"><div className="settings-label"><strong>화면 모드</strong><span>밝은 화면과 눈부심을 줄인 어두운 화면을 즉시 전환하며 다음 실행에도 유지합니다.</span></div><div className="button-row"><button className={`button${envelope.preferences.theme === "light" ? " primary" : ""}`} onClick={() => onUpdatePreferences({ ...envelope.preferences, theme: "light" })}><Sun size={14} /> 라이트</button><button className={`button${envelope.preferences.theme === "dark" ? " primary" : ""}`} onClick={() => onUpdatePreferences({ ...envelope.preferences, theme: "dark" })}><Moon size={14} /> 다크</button></div></div>
         <div className="settings-row"><div className="settings-label"><strong>AI 생활 시간표</strong><span>첫 과목 등록 대화에서 실제 학습 가능 시간과 요일 예외를 조사해 결정합니다.</span></div><div className="provider-card"><div className="provider-card-copy"><strong><Clock3 size={14} /> 기본 {envelope.learning.schedulePolicy.defaultReadyAt ?? envelope.checkIn.readyAt}~{envelope.learning.schedulePolicy.learningDeadline}</strong><p>{envelope.learning.schedulePolicy.constraintsSummary || "아직 인터뷰로 확정되지 않은 안전 기본값입니다."}</p><p>집중 {envelope.learning.schedulePolicy.maxSessionMinutes}분 · 정리 {envelope.learning.schedulePolicy.wrapUpMinutes}분 · 요일 예외 {envelope.learning.schedulePolicy.dayOverrides?.length ?? 0}개</p></div><span className={`tag ${envelope.learning.schedulePolicy.configuredBy === "ai-interview" ? "mint" : ""}`}>{envelope.learning.schedulePolicy.configuredBy === "ai-interview" ? "AI 확정" : "임시값"}</span></div></div>
@@ -2806,10 +3394,11 @@ function SettingsPage({
           </div>
         </div>
         <div className="settings-row"><div className="settings-label"><strong>내 API 연결</strong><span>다른 사용자도 자기 키를 넣어 쓸 수 있습니다. 키는 일반 학습 상태와 분리해 이 Windows 사용자에게 묶인 암호문으로만 현재 데이터 폴더에 저장합니다.</span></div><div className="grid"><ApiProviderEditor provider="openai" name="OpenAI" defaultModel="gpt-5.6-terra" status={providerStatus.openai} onChanged={onRefreshProviders} /><ApiProviderEditor provider="anthropic" name="Anthropic (Claude API + Agent 키)" defaultModel="claude-sonnet-5" status={providerStatus.anthropic} onChanged={onRefreshProviders} /><ApiProviderEditor provider="deepseek" name="DeepSeek" defaultModel="deepseek-v4-flash" status={providerStatus.deepseek} onChanged={onRefreshProviders} /><p className="field-hint credential-note"><ShieldCheck size={13} /> Anthropic 키는 Claude API와 Claude Agent에서만 공유됩니다. 승인된 Claude Agent 실행 파일을 라우팅에서 직접 선택한 경우에만 키가 전달되며, <code>--bare</code>로 구독 자격 증명과 로컬 확장을 읽지 않습니다. 다른 키도 해당 공급자 밖으로 전달하지 않습니다.</p></div></div>
+        <div className="settings-row"><div className="settings-label"><strong>최근 오류 기록</strong><span>오류 알림은 직접 닫을 때까지 남으며, 최근 50건의 사용자용 메시지를 보관합니다. 프롬프트와 API 키는 기록하지 않습니다.</span></div><div className="error-log-panel">{envelope.errorLog.length ? <>{envelope.errorLog.slice(-10).reverse().map((entry) => <div className="error-log-entry" key={entry.id}><div><strong>{entry.title}</strong><time dateTime={entry.at}>{formatErrorTimestamp(entry.at)}</time></div><p>{entry.message}</p></div>)}<button className="button danger" onClick={onClearErrorLog}><Trash2 size={14} /> 오류 기록 비우기</button></> : <p className="field-hint">아직 기록된 오류가 없습니다.</p>}</div></div>
         <div className="settings-row"><div className="settings-label"><strong>토큰 제작 예산</strong><span>강의와 커리큘럼에 쓸 월간 기준값입니다. 실제 공급자 한도와는 별개입니다.</span></div><div><div className="token-meter"><div className="token-stat"><strong>{tokens.toLocaleString()}</strong><span>기록된 토큰</span></div><div className="token-stat"><strong>{cached.toLocaleString()}</strong><span>캐시 입력</span></div><div className="token-stat"><strong>${cost.toFixed(3)}</strong><span>기록된 비용</span></div></div><label className="field section-gap"><span>월간 표시 예산</span><input className="input" type="number" min="10000" step="10000" value={envelope.preferences.monthlyTokenBudget} onChange={(event) => onUpdatePreferences({ ...envelope.preferences, monthlyTokenBudget: Number(event.target.value) })} /></label></div></div>
         <div className="settings-row"><div className="settings-label"><strong>저장 위치</strong><span>기본값은 앱이 놓인 포터블 폴더의 data 디렉터리입니다. 필요할 때만 다른 기존 폴더를 선택할 수 있습니다.</span></div><div><div className="provider-card"><div className="provider-card-copy"><strong><Database size={14} /> 포터블 루트</strong><p className="mono">{runtime?.portableRoot ?? "앱이 놓인 폴더"}</p><strong style={{ marginTop: 12 }}><ShieldCheck size={14} /> 현재 데이터 루트</strong><p className="mono">{runtime?.dataRoot ?? "앱이 놓인 폴더\\data"}</p><strong style={{ marginTop: 12 }}><FolderOpen size={14} /> 기본 데이터 루트</strong><p className="mono">{runtime?.defaultDataRoot ?? "앱이 놓인 폴더\\data"}</p></div><span className={`tag ${runtime?.dataRootIsDefault !== false ? "mint" : "violet"}`}>{runtime?.dataRootIsDefault !== false ? "앱 내부 기본값" : "사용자 지정"}</span></div><div className="button-row section-gap"><button className="button" disabled={Boolean(runtimeAction)} onClick={() => void configureRuntime("data-root", () => window.studyQuest!.runtime.pickDataRoot())}><FolderOpen size={14} /> 저장 폴더 변경</button>{runtime?.dataRootIsDefault === false && <button className="button" disabled={Boolean(runtimeAction)} onClick={() => void configureRuntime("data-default", () => window.studyQuest!.runtime.useDefaultDataRoot())}><RotateCcw size={14} /> 앱 내부 기본값</button>}</div><p className="field-hint">변경은 재시작 후 적용됩니다. 기존 데이터는 안전을 위해 자동 이동하거나 삭제하지 않습니다.</p>{runtimeMessage && <p className="field-hint runtime-message">{runtimeMessage}</p>}</div></div>
         <div className="settings-row"><div className="settings-label"><strong>게임 시간 보호</strong><span>{envelope.learning.schedulePolicy.gameStart}~{envelope.learning.schedulePolicy.gameEnd}를 학습 계획이 침범하지 못하게 합니다.</span></div><label className="provider-card" style={{ alignItems: "center" }}><div className="provider-card-copy"><strong><Gamepad2 size={14} /> 인터뷰로 정한 보상 루틴</strong><p>타이머와 계획이 시간을 보호하며 게임 프로세스를 강제 종료하지는 않습니다.</p></div><input type="checkbox" checked={envelope.preferences.protectGameTime} onChange={(event) => onUpdatePreferences({ ...envelope.preferences, protectGameTime: event.target.checked })} /></label></div>
-        <div className="settings-row"><div className="settings-label"><strong>학습 상태 초기화</strong><span>포터블 앱의 state.json에서 과목·진단·커리큘럼을 비우고 새 인터뷰로 돌아갑니다.</span></div><div><button className="button danger" onClick={onReset}><RotateCcw size={14} /> 과목 비우고 다시 시작</button><p className="field-hint">앱 전체 삭제는 앱을 종료한 뒤 압축을 풀어 둔 StudyQuest 폴더를 삭제하면 됩니다.</p></div></div>
+        <div className="settings-row"><div className="settings-label"><strong>학습 상태 초기화</strong><span>포터블 앱의 studyquest.json에서 과목·진단·커리큘럼만 비우고 새 인터뷰로 돌아갑니다. AI 연결과 오류 기록은 유지합니다.</span></div><div><button className="button danger" onClick={onReset}><RotateCcw size={14} /> 과목 비우고 다시 시작</button><p className="field-hint">앱 전체 삭제는 앱을 종료한 뒤 압축을 풀어 둔 StudyQuest 폴더를 삭제하면 됩니다.</p></div></div>
       </div>
     </section>
   );
@@ -2817,13 +3406,19 @@ function SettingsPage({
 
 function CommandDock({ onSubmit }: { onSubmit(value: string): void }) {
   const [value, setValue] = useState("");
+  const suggestions = [
+    "오늘 너무 피곤하니 각 과목을 최소 학습량으로 줄여줘.",
+    "이번 주 React를 부스트하고 다른 과목은 최소 유지로 조정해줘.",
+    "수학 때문에 원고가 막혔어. 다음 퀘스트 우선순위를 조정해줘.",
+  ];
+  const completion = findPromptCompletion(value, suggestions);
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (!value.trim()) return;
     onSubmit(value.trim());
     setValue("");
   };
-  return <form className="command-dock" onSubmit={submit}><Sparkles size={17} /><input className="command-input" value={value} onChange={(event) => setValue(event.target.value)} placeholder="예: 오늘 너무 피곤해 · 이번 주 React 부스트 · 수학 때문에 원고가 막혔어" /><button className="button primary icon-only" aria-label="학습 지시 보내기"><Send size={15} /></button></form>;
+  return <form className="command-dock" onSubmit={submit}>{completion && <div className="tab-completion-hint command-completion"><kbd>Tab</kbd><span>{completion}</span></div>}<Sparkles size={17} /><input className="command-input" value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Tab" && completion && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !event.nativeEvent.isComposing) { event.preventDefault(); setValue(completion); } }} placeholder="예: 오늘 너무 피곤해 · 이번 주 React 부스트 · 수학 때문에 원고가 막혔어" /><button className="button primary icon-only" aria-label="학습 지시 보내기"><Send size={15} /></button></form>;
 }
 
 function ApiProviderEditor({
