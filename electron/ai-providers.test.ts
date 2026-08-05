@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { describe, expect, it, vi } from "vitest";
@@ -100,6 +101,36 @@ const lesson = {
   reviewPrompt: "After the final check, write one claim with its reason and applicable conclusion.",
 };
 
+const interview = {
+  assistantMessage: "CSS 학습 범위와 목표를 확인했습니다. 이제 생활 시간표를 한 번 확인할게요.",
+  readiness: 0.55,
+  readyForDiagnostic: false,
+  subjectBlueprint: {
+    subjectName: "CSS",
+    role: "support",
+    dailyMinutes: 30,
+    knownSummary: "기본 선택자는 사용해 본 적이 있습니다.",
+    unknownSummary: "반응형 레이아웃과 Grid는 테스트로 확인합니다.",
+    goal: "반응형 웹 화면을 스스로 구현합니다.",
+    successEvidence: "참고 화면을 보고 반응형 페이지를 완성합니다.",
+    skills: [
+      { name: "CSS 레이아웃", prerequisites: [], reason: "화면 구조를 구현하는 핵심 능력" },
+    ],
+  },
+  scheduleRecommendation: {
+    defaultReadyAt: null,
+    learningDeadline: null,
+    protectGameTime: null,
+    gameStart: null,
+    gameEnd: null,
+    wrapUpMinutes: 10,
+    maxSessionMinutes: 30,
+    dayOverrides: [],
+    constraintsSummary: "학습 가능 시간을 사용자에게 확인 중입니다.",
+  },
+  followUpQuestions: ["보통 몇 시부터 공부를 시작할 수 있나요?"],
+};
+
 function response(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), {
     status,
@@ -179,6 +210,111 @@ describe("Claude CLI JSON output", () => {
   it("distinguishes empty output from malformed output", () => {
     expect(() => parseClaudeJsonOutput("  \n")).toThrow("Claude returned no output.");
     expect(() => parseClaudeJsonOutput("not-json")).toThrow("Claude returned invalid JSON output.");
+  });
+});
+
+describe("Codex physical output schemas", () => {
+  it("passes a verified physical schema file to native Codex", async () => {
+    const dataRoot = path.join(process.cwd(), ".tmp", "codex-schema-physical");
+    const schemasRoot = path.join(process.cwd(), "schemas");
+    let physicalSchemaPath = "";
+    const runProcessImpl = vi.fn(async (input: { args: string[] }) => {
+      const schemaFlag = input.args.indexOf("--output-schema");
+      expect(schemaFlag).toBeGreaterThan(-1);
+      physicalSchemaPath = input.args[schemaFlag + 1];
+      expect(fs.statSync(physicalSchemaPath).isFile()).toBe(true);
+      expect(physicalSchemaPath.toLowerCase()).not.toContain("app.asar");
+      expect(physicalSchemaPath).toBe(fs.realpathSync(path.join(schemasRoot, "interview.schema.json")));
+      const physicalSchema = JSON.parse(fs.readFileSync(physicalSchemaPath, "utf8"));
+      expect(physicalSchema.required).toContain("subjectBlueprint");
+      return {
+        stdout: [
+          JSON.stringify({
+            type: "item.completed",
+            item: { type: "agent_message", text: JSON.stringify(interview) },
+          }),
+          JSON.stringify({
+            type: "turn.completed",
+            usage: { input_tokens: 120, cached_input_tokens: 20, output_tokens: 80 },
+          }),
+        ].join("\n"),
+        stderr: "",
+        code: 0,
+      };
+    });
+    const providers = new AIProviders({
+      portableRoot: process.cwd(),
+      dataRoot,
+      schemasRoot,
+      codexSchemasRoot: schemasRoot,
+      credentialStore: { status: vi.fn(async () => ({ providers: {} })) },
+      fetchImpl: vi.fn(),
+      runProcessImpl,
+    });
+    providers.inspectProviders = vi.fn(async () => ({
+      codex: { public: { available: true }, executable: "codex.exe" },
+    }));
+
+    const result = await providers.invoke({
+      provider: "codex",
+      operation: "interview",
+      schemaName: "interview",
+      prompt: "CSS를 배우고 싶습니다.",
+    });
+
+    expect(result).toMatchObject({ ok: true, provider: "codex", data: interview });
+    expect(runProcessImpl).toHaveBeenCalledTimes(1);
+    expect(physicalSchemaPath).not.toBe("");
+    expect(fs.existsSync(physicalSchemaPath)).toBe(true);
+  });
+
+  it("rejects a physical schema that differs from the trusted ASAR schema", async () => {
+    const temporaryParent = path.join(process.cwd(), ".tmp");
+    fs.mkdirSync(temporaryParent, { recursive: true });
+    const physicalSchemasRoot = fs.mkdtempSync(path.join(temporaryParent, "codex-schema-mismatch-"));
+    const runProcessImpl = vi.fn();
+    try {
+      fs.writeFileSync(
+        path.join(physicalSchemasRoot, "interview.schema.json"),
+        `${JSON.stringify({ type: "object", properties: {} })}\n`,
+        "utf8",
+      );
+      const providers = new AIProviders({
+        portableRoot: process.cwd(),
+        dataRoot: path.join(process.cwd(), ".tmp", "codex-schema-mismatch-data"),
+        schemasRoot: path.join(process.cwd(), "schemas"),
+        codexSchemasRoot: physicalSchemasRoot,
+        credentialStore: { status: vi.fn(async () => ({ providers: {} })) },
+        fetchImpl: vi.fn(),
+        runProcessImpl,
+      });
+      providers.inspectProviders = vi.fn(async () => ({
+        codex: { public: { available: true }, executable: "codex.exe" },
+      }));
+
+      const result = await providers.invoke({
+        provider: "codex",
+        operation: "interview",
+        schemaName: "interview",
+        prompt: "CSS를 배우고 싶습니다.",
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        provider: "codex",
+        error: "Physical Codex schema does not match the trusted app schema.",
+      });
+      expect(runProcessImpl).not.toHaveBeenCalled();
+    } finally {
+      const resolvedParent = path.resolve(temporaryParent);
+      const resolvedTemporary = path.resolve(physicalSchemasRoot);
+      if (
+        resolvedTemporary.startsWith(`${resolvedParent}${path.sep}`)
+        && path.basename(resolvedTemporary).startsWith("codex-schema-mismatch-")
+      ) {
+        fs.rmSync(resolvedTemporary, { recursive: true, force: true });
+      }
+    }
   });
 });
 
@@ -598,6 +734,38 @@ describe("API provider routing", () => {
     });
     const result = await providers.invoke({ provider: "auto", operation: "lesson", schemaName: "lesson", prompt: "teach me" });
     expect(result).toMatchObject({ ok: true, provider: "openai" });
+  });
+
+  it("falls through malformed structured CLI output in automatic mode", async () => {
+    const fetchImpl = vi.fn();
+    const { providers } = createProvider(fetchImpl);
+    providers.inspectProviders = vi.fn(async () => ({
+      codex: { public: { available: true }, executable: "codex.exe" },
+      claude: { public: { available: false } },
+      openai: { public: { available: true }, transport: "api" },
+      anthropic: { public: { available: false } },
+      deepseek: { public: { available: false } },
+    }));
+    providers.invokeCodexCli = vi.fn(async () => ({
+      text: "This response is not a JSON object.",
+      data: undefined,
+      usage: {},
+    }));
+    providers.invokeApi = vi.fn(async (provider: string) => {
+      expect(provider).toBe("openai");
+      return { text: JSON.stringify(lesson), data: lesson, usage: {} };
+    });
+
+    const result = await providers.invoke({
+      provider: "auto",
+      operation: "lesson",
+      schemaName: "lesson",
+      prompt: "teach me",
+    });
+
+    expect(result).toMatchObject({ ok: true, provider: "openai", data: lesson });
+    expect(providers.invokeCodexCli).toHaveBeenCalledTimes(1);
+    expect(providers.invokeApi).toHaveBeenCalledTimes(1);
   });
 
   it("supports memory-only WebM transcription and redacts authentication failures", async () => {

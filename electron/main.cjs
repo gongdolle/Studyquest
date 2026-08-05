@@ -186,9 +186,16 @@ const schemasRoot = [
   path.join(portableRoot, 'schemas'),
 ].find((candidate) => fs.existsSync(candidate));
 if (!schemasRoot) throw new Error('StudyQuest response schemas were not found.');
+const codexSchemasRoot = app.isPackaged
+  ? path.join(path.dirname(app.getAppPath()), 'studyquest-schemas')
+  : schemasRoot;
+if (!fs.existsSync(codexSchemasRoot)) {
+  throw new Error('Physical Codex response schemas were not found.');
+}
 const aiProviders = createAIProviders({
   portableRoot,
   schemasRoot,
+  codexSchemasRoot,
   dataRoot,
   cliPaths: portableConfig.cliPaths,
   credentialStore,

@@ -512,6 +512,7 @@ class AIProviders {
   constructor({
     portableRoot,
     schemasRoot,
+    codexSchemasRoot = schemasRoot,
     dataRoot,
     credentialStore,
     appRoot = portableRoot,
@@ -521,6 +522,7 @@ class AIProviders {
   }) {
     this.portableRoot = path.resolve(portableRoot);
     this.schemasRoot = path.resolve(schemasRoot);
+    this.codexSchemasRoot = path.resolve(codexSchemasRoot);
     this.dataRoot = path.resolve(dataRoot);
     this.appRoot = path.resolve(appRoot);
     this.cliPaths = Object.freeze({
@@ -608,6 +610,48 @@ class AIProviders {
       throw new ProviderError('invalid_schema', 'Schema must be a JSON object.');
     }
     return { schema, schemaPath };
+  }
+
+  resolveCodexSchemaPath(schemaName, trustedSchema) {
+    const fileName = SCHEMA_FILES[schemaName];
+    if (!fileName) throw new ProviderError('invalid_schema', 'Unknown Codex output schema.');
+    try {
+      const rootStats = fs.lstatSync(this.codexSchemasRoot);
+      if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) {
+        throw new ProviderError('invalid_schema', 'Physical Codex schema directory is invalid.');
+      }
+      const physicalRoot = fs.realpathSync(this.codexSchemasRoot);
+      const schemaPath = path.resolve(physicalRoot, fileName);
+      if (path.dirname(schemaPath) !== physicalRoot) {
+        throw new ProviderError('invalid_schema', 'Physical Codex schema path escaped its directory.');
+      }
+      const schemaStats = fs.lstatSync(schemaPath);
+      if (
+        !schemaStats.isFile()
+        || schemaStats.isSymbolicLink()
+        || schemaStats.size > MAX_SCHEMA_BYTES
+      ) {
+        throw new ProviderError('invalid_schema', 'Physical Codex schema is missing or invalid.');
+      }
+      const physicalPath = fs.realpathSync(schemaPath);
+      if (path.dirname(physicalPath) !== physicalRoot) {
+        throw new ProviderError('invalid_schema', 'Physical Codex schema resolved outside its directory.');
+      }
+      const physicalSchema = JSON.parse(fs.readFileSync(physicalPath, 'utf8'));
+      if (JSON.stringify(physicalSchema) !== JSON.stringify(trustedSchema)) {
+        throw new ProviderError(
+          'invalid_schema',
+          'Physical Codex schema does not match the trusted app schema.',
+        );
+      }
+      return physicalPath;
+    } catch (error) {
+      if (error instanceof ProviderError) throw error;
+      throw new ProviderError(
+        'invalid_schema',
+        `Physical Codex schema could not be verified: ${cleanMessage(error?.message)}`,
+      );
+    }
   }
 
   validateStructured(schemaName, schema, value) {
@@ -1048,7 +1092,8 @@ class AIProviders {
     return normalized;
   }
 
-  async invokeCodexCli(executable, request, schemaPath, controller) {
+  async invokeCodexCli(executable, request, schema, controller) {
+    const schemaPath = this.resolveCodexSchemaPath(request.schemaName, schema);
     const args = [
       'exec',
       '--ephemeral',
@@ -1075,7 +1120,7 @@ class AIProviders {
       '-',
     ];
     const startedAt = Date.now();
-    const result = await runProcess({
+    const result = await this.runProcess({
       executable,
       args,
       input: combinedPrompt(request),
@@ -1314,7 +1359,7 @@ class AIProviders {
     try {
       const request = validateInvokeRequest(input);
       requestId = request.requestId;
-      const { schema, schemaPath } = this.loadSchema(request.schemaName);
+      const { schema } = this.loadSchema(request.schemaName);
       if (this.activeRequests.size >= MAX_CONCURRENT_REQUESTS) {
         throw new ProviderError('busy', 'Too many AI requests are already running.');
       }
@@ -1350,6 +1395,7 @@ class AIProviders {
       const fallbackCodes = new Set([
         'authentication_failed', 'access_denied', 'model_unavailable', 'rate_limited',
         'provider_unavailable', 'provider_failed', 'spawn_failed', 'network_failed', 'empty_response',
+        'invalid_output', 'output_limit', 'timeout',
       ]);
       for (const candidate of candidates) {
         provider = candidate;
@@ -1361,7 +1407,7 @@ class AIProviders {
           } else if (API_PROVIDER_IDS.has(candidate)) {
             result = await this.invokeApi(candidate, request, schema, controller);
           } else {
-            result = await this.invokeCodexCli(target.executable, request, schemaPath, controller);
+            result = await this.invokeCodexCli(target.executable, request, schema, controller);
           }
           result.data = this.validateStructured(request.schemaName, schema, result.data);
           break;

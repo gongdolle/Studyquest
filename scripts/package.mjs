@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { cp, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { packager } from "@electron/packager";
@@ -38,6 +38,11 @@ const appPaths = await packager({
 
 for (const appPath of appPaths) {
   await mkdir(path.join(appPath, "data"), { recursive: true });
+  await cp(
+    path.join(root, "schemas"),
+    path.join(appPath, "resources", "studyquest-schemas"),
+    { recursive: true },
+  );
   await writeFile(path.join(appPath, ".studyquest-root"), "portable-root\n", "utf8");
   await writeFile(
     path.join(appPath, "삭제 안내.txt"),

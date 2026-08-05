@@ -378,6 +378,18 @@ const providerLabels: Record<AIProviderId, string> = {
 
 const providerLabel = (provider: AIProviderId) => providerLabels[provider];
 
+const aiFailureMessage = (result: AIInvokeResult): string => {
+  const provider = providerLabel(result.provider);
+  const message = result.error?.trim() || "AI 생성에 실패했습니다.";
+  if (/structured object|outside the required schema|invalid JSON output/i.test(message)) {
+    return `${provider} 응답 형식을 자동 복구하지 못했습니다. 방금 입력은 유지되었습니다. 같은 내용을 다시 보내 재시도하거나 설정에서 다른 AI를 선택해 주세요.`;
+  }
+  if (/timed out|timeout/i.test(message)) {
+    return `${provider} 응답이 제한 시간 안에 도착하지 않아 중단했습니다. 방금 입력은 유지되었습니다. 잠시 후 다시 시도하거나 설정에서 다른 AI를 선택해 주세요.`;
+  }
+  return `${provider}: ${message}`;
+};
+
 const createInitialInterview = (): InterviewState => ({
   status: "idle",
   readiness: 0,
@@ -900,7 +912,10 @@ export default function App() {
     validator?: (value: unknown) => value is T,
   ): Promise<{ payload: T; result: AIInvokeResult }> => {
     if (!window.studyQuest) throw new Error("데스크톱 AI 브리지를 사용할 수 없습니다.");
-    setBusy({ label, detail: "관련 스킬 노드만 전달해 구조화된 결과를 만들고 있습니다." });
+    setBusy({
+      label,
+      detail: "AI 응답을 기다린 뒤 데이터 구조를 검증하고 있습니다. 보통 20~60초이며 복잡한 작업이나 서비스 혼잡 시 더 걸릴 수 있습니다.",
+    });
     try {
       const result = await window.studyQuest.ai.invoke({
         provider: envelope.preferences.provider,
@@ -909,7 +924,7 @@ export default function App() {
         schemaName,
         timeoutMs: 240_000,
       });
-      if (!result.ok) throw new Error(result.error || "AI 생성에 실패했습니다.");
+      if (!result.ok) throw new Error(aiFailureMessage(result));
       const payload = extractStructuredData<T>(result, validator);
       commit((current) => ({
         ...current,
