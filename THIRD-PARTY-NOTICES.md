@@ -107,6 +107,6 @@ Electron은 개발 의존성이지만 완성된 데스크톱 실행 파일의 �
 
 ## 확인 기준
 
-이 목록은 StudyQuest `0.1.0`의 Windows x64 production 설치 트리를 기준으로 합니다.
+이 목록은 StudyQuest `0.1.1`의 Windows x64 production 설치 트리를 기준으로 합니다.
 의존성을 변경하면 실제 배포 트리와 패키지에 포함된 원문을 다시 확인해 이 문서도
 함께 갱신해야 합니다.

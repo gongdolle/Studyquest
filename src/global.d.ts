@@ -22,7 +22,7 @@ declare global {
   }
 
   type AIProviderId = "codex" | "claude" | "openai" | "anthropic" | "deepseek";
-  type AIProviderPreference = "auto" | "codex" | "openai" | "anthropic" | "deepseek";
+  type AIProviderPreference = "auto" | "codex" | "claude" | "openai" | "anthropic" | "deepseek";
   type APIProviderId = "openai" | "anthropic" | "deepseek";
 
   interface AIInvokeRequest {
@@ -76,8 +76,8 @@ declare global {
       getInfo(): Promise<RuntimeInfo>;
       pickDataRoot(): Promise<RuntimeConfigurationResult>;
       useDefaultDataRoot(): Promise<RuntimeConfigurationResult>;
-      pickCliExecutable(provider: "codex"): Promise<RuntimeConfigurationResult>;
-      useAutomaticCli(provider: "codex"): Promise<RuntimeConfigurationResult>;
+      pickCliExecutable(provider: "codex" | "claude"): Promise<RuntimeConfigurationResult>;
+      useAutomaticCli(provider: "codex" | "claude"): Promise<RuntimeConfigurationResult>;
     };
     state: {
       load<T>(): Promise<T | null>;

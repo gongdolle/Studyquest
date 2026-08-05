@@ -370,7 +370,7 @@ const currentTime = () =>
 
 const providerLabels: Record<AIProviderId, string> = {
   codex: "Codex CLI",
-  claude: "Claude Code",
+  claude: "Claude Agent",
   openai: "OpenAI API",
   anthropic: "Claude API",
   deepseek: "DeepSeek API",
@@ -583,7 +583,7 @@ const hydrateEnvelope = (value: unknown): AppEnvelope => {
       ...initial.preferences,
       ...(candidate.preferences ?? {}),
       provider: new Set<AIProviderPreference>([
-        "auto", "codex", "openai", "anthropic", "deepseek",
+        "auto", "codex", "claude", "openai", "anthropic", "deepseek",
       ]).has(candidate.preferences?.provider ?? "auto")
         ? candidate.preferences?.provider ?? "auto"
         : "auto",
@@ -1825,6 +1825,10 @@ export default function App() {
             <strong>{providerStatus.codex.available ? "1/1" : "0/1"}</strong>
           </div>
           <div className="provider-row">
+            <span>Claude Agent</span>
+            <strong>{providerStatus.claude.available ? "1/1" : "0/1"}</strong>
+          </div>
+          <div className="provider-row">
             <span>개인 API</span>
             <strong>{[providerStatus.openai, providerStatus.anthropic, providerStatus.deepseek].filter((item) => item.available).length}/3</strong>
           </div>
@@ -2092,6 +2096,7 @@ function OnboardingPage({
             </div>
             <div className="button-row">
               <span className={`tag ${providerStatus.codex.available ? "mint" : ""}`}>Codex CLI {providerStatus.codex.available ? "1/1" : "0/1"}</span>
+              <span className={`tag ${providerStatus.claude.available ? "mint" : ""}`}>Claude Agent {providerStatus.claude.available ? "1/1" : "0/1"}</span>
               <span className={`tag ${[providerStatus.openai, providerStatus.anthropic, providerStatus.deepseek].some((item) => item.available) ? "mint" : ""}`}>개인 API {[providerStatus.openai, providerStatus.anthropic, providerStatus.deepseek].filter((item) => item.available).length}/3</span>
               {interview.status !== "idle" && <button className="button ghost" onClick={onReset}><RotateCcw size={14} /> 과목 등록 다시 시작</button>}
             </div>
@@ -2744,18 +2749,20 @@ function SettingsPage({
         <div className="settings-row">
           <div className="settings-label">
             <strong>AI 라우팅</strong>
-            <span>Codex CLI를 자동 인식하고, OpenAI·Claude·DeepSeek는 사용자가 연결한 개인 API 키로 사용할 수 있습니다. 자동은 동작 가능한 공급자를 순서대로 사용합니다.</span>
+            <span>Codex CLI는 자동 인식합니다. Claude Agent는 실행 파일을 직접 승인하고 Anthropic API 키를 저장한 뒤, 라우팅에서 직접 선택했을 때만 동작합니다.</span>
           </div>
           <div>
             <select className="select" value={envelope.preferences.provider} onChange={(event) => onUpdatePreferences({ ...envelope.preferences, provider: event.target.value as AppEnvelope["preferences"]["provider"] })}>
               <option value="auto">자동 라우팅</option>
               <option value="codex">Codex CLI</option>
+              <option value="claude">Claude Agent (CLI)</option>
               <option value="openai">OpenAI API</option>
               <option value="anthropic">Claude API</option>
               <option value="deepseek">DeepSeek API</option>
             </select>
             <div className="section-gap">
               <ProviderCard name="Codex CLI" status={providerStatus.codex} icon={<SquareTerminal size={15} />} />
+              <ProviderCard name="Claude Agent (CLI + API 키)" status={providerStatus.claude} icon={<SquareTerminal size={15} />} />
             </div>
             <div className="runtime-path-grid section-gap">
               <div>
@@ -2765,11 +2772,25 @@ function SettingsPage({
                   {runtime?.cliPaths.codex && <button className="button" disabled={Boolean(runtimeAction)} onClick={() => void configureRuntime("codex-auto", () => window.studyQuest!.runtime.useAutomaticCli("codex"))}><RotateCcw size={14} /> 자동 탐색</button>}
                 </div>
               </div>
+              <div>
+                <p className="field-hint">Claude Agent: {runtime?.cliPaths.claude ? "승인된 실행 파일" : providerStatus.claude.source ? "감지됨 · 사용 전 승인 필요" : "실행 파일 승인 필요"}</p>
+                {!runtime?.cliPaths.claude && providerStatus.claude.source && <p className="field-hint mono">감지 위치: {providerStatus.claude.source}</p>}
+                <div className="button-row">
+                  <button className="button" disabled={Boolean(runtimeAction)} onClick={() => void configureRuntime("claude", () => window.studyQuest!.runtime.pickCliExecutable("claude"))}><FolderOpen size={14} /> 실행 파일 승인</button>
+                  {runtime?.cliPaths.claude && <button className="button" disabled={Boolean(runtimeAction)} onClick={() => void configureRuntime("claude-auto", () => window.studyQuest!.runtime.useAutomaticCli("claude"))}><RotateCcw size={14} /> 승인 해제</button>}
+                </div>
+              </div>
             </div>
-            <p className="field-hint section-gap">Claude는 공개 배포 정책에 맞춰 Claude Code 구독 로그인을 대신 사용하지 않고 Anthropic API 키로 연결합니다.</p>
+            <p className="field-hint section-gap credential-note"><ShieldCheck size={13} /> {providerStatus.anthropic.configured
+              ? providerStatus.anthropic.available
+                ? providerStatus.anthropic.verifiedAt
+                  ? "Anthropic API 연결이 확인되었습니다. Claude Agent를 직접 선택하면 이 키를 사용하며 구독 로그인으로 폴백하지 않습니다."
+                  : "Anthropic API 키가 암호화 저장되어 사용할 수 있습니다. 실제 연결 확인은 아래의 연결 확인 버튼으로 진행하세요."
+                : `저장된 Anthropic API 키를 다시 연결해 주세요. ${providerStatus.anthropic.reason ?? "Claude Agent는 키를 사용할 수 있을 때까지 실행되지 않습니다."}`
+              : "Claude Agent를 사용하려면 아래에서 본인의 Anthropic API 키를 먼저 저장해야 합니다. 구독 로그인은 사용하지 않습니다."}</p>
           </div>
         </div>
-        <div className="settings-row"><div className="settings-label"><strong>내 API 연결</strong><span>다른 사용자도 자기 키를 넣어 쓸 수 있습니다. 키는 일반 학습 상태와 분리해 이 Windows 사용자에게 묶인 암호문으로만 현재 데이터 폴더에 저장합니다.</span></div><div className="grid"><ApiProviderEditor provider="openai" name="OpenAI" defaultModel="gpt-5.6-terra" status={providerStatus.openai} onChanged={onRefreshProviders} /><ApiProviderEditor provider="anthropic" name="Claude API" defaultModel="claude-sonnet-5" status={providerStatus.anthropic} onChanged={onRefreshProviders} /><ApiProviderEditor provider="deepseek" name="DeepSeek" defaultModel="deepseek-v4-flash" status={providerStatus.deepseek} onChanged={onRefreshProviders} /><p className="field-hint credential-note"><ShieldCheck size={13} /> 학습 데이터는 옮길 수 있지만 암호화된 키는 다른 PC·다른 Windows 사용자에서 다시 입력해야 합니다. 키는 Codex CLI나 다른 외부 프로그램에 전달하지 않습니다.</p></div></div>
+        <div className="settings-row"><div className="settings-label"><strong>내 API 연결</strong><span>다른 사용자도 자기 키를 넣어 쓸 수 있습니다. 키는 일반 학습 상태와 분리해 이 Windows 사용자에게 묶인 암호문으로만 현재 데이터 폴더에 저장합니다.</span></div><div className="grid"><ApiProviderEditor provider="openai" name="OpenAI" defaultModel="gpt-5.6-terra" status={providerStatus.openai} onChanged={onRefreshProviders} /><ApiProviderEditor provider="anthropic" name="Anthropic (Claude API + Agent 키)" defaultModel="claude-sonnet-5" status={providerStatus.anthropic} onChanged={onRefreshProviders} /><ApiProviderEditor provider="deepseek" name="DeepSeek" defaultModel="deepseek-v4-flash" status={providerStatus.deepseek} onChanged={onRefreshProviders} /><p className="field-hint credential-note"><ShieldCheck size={13} /> Anthropic 키는 Claude API와 Claude Agent에서만 공유됩니다. 승인된 Claude Agent 실행 파일을 라우팅에서 직접 선택한 경우에만 키가 전달되며, <code>--bare</code>로 구독 자격 증명과 로컬 확장을 읽지 않습니다. 다른 키도 해당 공급자 밖으로 전달하지 않습니다.</p></div></div>
         <div className="settings-row"><div className="settings-label"><strong>토큰 제작 예산</strong><span>강의와 커리큘럼에 쓸 월간 기준값입니다. 실제 공급자 한도와는 별개입니다.</span></div><div><div className="token-meter"><div className="token-stat"><strong>{tokens.toLocaleString()}</strong><span>기록된 토큰</span></div><div className="token-stat"><strong>{cached.toLocaleString()}</strong><span>캐시 입력</span></div><div className="token-stat"><strong>${cost.toFixed(3)}</strong><span>기록된 비용</span></div></div><label className="field section-gap"><span>월간 표시 예산</span><input className="input" type="number" min="10000" step="10000" value={envelope.preferences.monthlyTokenBudget} onChange={(event) => onUpdatePreferences({ ...envelope.preferences, monthlyTokenBudget: Number(event.target.value) })} /></label></div></div>
         <div className="settings-row"><div className="settings-label"><strong>저장 위치</strong><span>기본값은 앱이 놓인 포터블 폴더의 data 디렉터리입니다. 필요할 때만 다른 기존 폴더를 선택할 수 있습니다.</span></div><div><div className="provider-card"><div className="provider-card-copy"><strong><Database size={14} /> 포터블 루트</strong><p className="mono">{runtime?.portableRoot ?? "앱이 놓인 폴더"}</p><strong style={{ marginTop: 12 }}><ShieldCheck size={14} /> 현재 데이터 루트</strong><p className="mono">{runtime?.dataRoot ?? "앱이 놓인 폴더\\data"}</p><strong style={{ marginTop: 12 }}><FolderOpen size={14} /> 기본 데이터 루트</strong><p className="mono">{runtime?.defaultDataRoot ?? "앱이 놓인 폴더\\data"}</p></div><span className={`tag ${runtime?.dataRootIsDefault !== false ? "mint" : "violet"}`}>{runtime?.dataRootIsDefault !== false ? "앱 내부 기본값" : "사용자 지정"}</span></div><div className="button-row section-gap"><button className="button" disabled={Boolean(runtimeAction)} onClick={() => void configureRuntime("data-root", () => window.studyQuest!.runtime.pickDataRoot())}><FolderOpen size={14} /> 저장 폴더 변경</button>{runtime?.dataRootIsDefault === false && <button className="button" disabled={Boolean(runtimeAction)} onClick={() => void configureRuntime("data-default", () => window.studyQuest!.runtime.useDefaultDataRoot())}><RotateCcw size={14} /> 앱 내부 기본값</button>}</div><p className="field-hint">변경은 재시작 후 적용됩니다. 기존 데이터는 안전을 위해 자동 이동하거나 삭제하지 않습니다.</p>{runtimeMessage && <p className="field-hint runtime-message">{runtimeMessage}</p>}</div></div>
         <div className="settings-row"><div className="settings-label"><strong>게임 시간 보호</strong><span>{envelope.learning.schedulePolicy.gameStart}~{envelope.learning.schedulePolicy.gameEnd}를 학습 계획이 침범하지 못하게 합니다.</span></div><label className="provider-card" style={{ alignItems: "center" }}><div className="provider-card-copy"><strong><Gamepad2 size={14} /> 인터뷰로 정한 보상 루틴</strong><p>타이머와 계획이 시간을 보호하며 게임 프로세스를 강제 종료하지는 않습니다.</p></div><input type="checkbox" checked={envelope.preferences.protectGameTime} onChange={(event) => onUpdatePreferences({ ...envelope.preferences, protectGameTime: event.target.checked })} /></label></div>

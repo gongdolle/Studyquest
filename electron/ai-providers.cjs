@@ -6,7 +6,7 @@ const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const Ajv = require('ajv');
 
-const PROVIDERS = new Set(['auto', 'codex', 'openai', 'anthropic', 'deepseek']);
+const PROVIDERS = new Set(['auto', 'codex', 'claude', 'openai', 'anthropic', 'deepseek']);
 const API_PROVIDER_IDS = new Set(['openai', 'anthropic', 'deepseek']);
 const OPERATIONS = new Set(['interview', 'diagnostic', 'curriculum', 'lesson', 'evaluation']);
 const SCHEMA_FILES = Object.freeze({
@@ -27,6 +27,7 @@ const MAX_CONCURRENT_REQUESTS = 2;
 const STATUS_CACHE_MS = 5_000;
 const API_TEST_TIMEOUT_MS = 20_000;
 const EMPTY_CLAUDE_MCP_CONFIG = JSON.stringify({ mcpServers: {} });
+const CLAUDE_BARE_MINIMUM_VERSION = '2.1.81';
 
 class ProviderError extends Error {
   constructor(code, message) {
@@ -43,6 +44,14 @@ function cleanMessage(value, maxLength = 1_200) {
     .replace(/((?:authorization|x-api-key|api[-_ ]?key)\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+/gi, '$1[redacted]')
     .trim()
     .slice(0, maxLength);
+}
+
+function cleanMessageWithSecret(value, secret, maxLength = 1_200) {
+  let message = String(value ?? '');
+  if (typeof secret === 'string' && secret.length >= 8) {
+    message = message.split(secret).join('[redacted]');
+  }
+  return cleanMessage(message, maxLength);
 }
 
 function clampTimeout(value) {
@@ -163,6 +172,30 @@ function providerEnvironment(dataRoot) {
   environment.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS = '1';
 
   return environment;
+}
+
+function claudeIsolatedEnvironment(dataRoot) {
+  const environment = providerEnvironment(dataRoot);
+  const configRoot = path.join(dataRoot, 'providers', 'claude-api-key-only');
+  fs.mkdirSync(configRoot, { recursive: true });
+  environment.CLAUDE_CONFIG_DIR = configRoot;
+  return environment;
+}
+
+function claudeApiKeyEnvironment(dataRoot, apiKey) {
+  if (typeof apiKey !== 'string' || !apiKey.trim() || apiKey.includes('\u0000')) {
+    throw new ProviderError(
+      'authentication_failed',
+      'An Anthropic API key is required to use the Claude CLI provider.',
+    );
+  }
+  const environment = claudeIsolatedEnvironment(dataRoot);
+  environment.ANTHROPIC_API_KEY = apiKey;
+  return environment;
+}
+
+function claudeHelpSupportsBare(value) {
+  return /(?:^|\s)--bare(?=\s|,|$)/m.test(String(value ?? ''));
 }
 
 function httpErrorForStatus(status) {
@@ -484,6 +517,7 @@ class AIProviders {
     appRoot = portableRoot,
     fetchImpl = globalThis.fetch,
     cliPaths = {},
+    runProcessImpl = runProcess,
   }) {
     this.portableRoot = path.resolve(portableRoot);
     this.schemasRoot = path.resolve(schemasRoot);
@@ -495,6 +529,7 @@ class AIProviders {
     });
     this.credentialStore = credentialStore;
     this.fetchImpl = fetchImpl;
+    this.runProcess = runProcessImpl;
     this.activeRequests = new Map();
     this.statusCache = null;
     this.statusPromise = null;
@@ -531,7 +566,9 @@ class AIProviders {
         args: ['--version'],
         input: '',
         cwd: this.portableRoot,
-        env: providerEnvironment(this.dataRoot),
+        env: provider === 'claude'
+          ? claudeIsolatedEnvironment(this.dataRoot)
+          : providerEnvironment(this.dataRoot),
         timeoutMs: 5_000,
         maxOutputBytes: 32 * 1024,
       });
@@ -706,29 +743,54 @@ class AIProviders {
   }
 
   async inspectClaude() {
-    const override = await this.inspectCliOverride('claude', 'Claude Code');
-    if (override) return override;
+    const configuredPath = this.cliPaths.claude;
+    if (!configuredPath) {
+      const detectedPath = this.resolveClaudePath();
+      if (!detectedPath) {
+        return {
+          public: {
+            available: false,
+            reason: 'Claude Agent executable was not found. Install it separately, then approve its path in Settings.',
+          },
+        };
+      }
+      return {
+        public: {
+          available: false,
+          source: detectedPath,
+          reason: 'Claude Agent was detected but is not approved. Select this executable in Settings before it can run or receive your Anthropic API key.',
+        },
+      };
+    }
 
-    const executable = this.resolveClaudePath();
+    const executable = firstExecutable([configuredPath]);
     if (!executable) {
-      return { public: { available: false, reason: 'Claude Code executable was not found.' } };
+      return {
+        public: {
+          available: false,
+          source: configuredPath,
+          reason: 'The approved Claude Agent executable was not found or is not executable.',
+        },
+      };
     }
 
     try {
-      const probe = await runProcess({
-        executable,
-        args: ['--version'],
-        input: '',
-        cwd: this.portableRoot,
-        env: providerEnvironment(this.dataRoot),
-        timeoutMs: 5_000,
-        maxOutputBytes: 32 * 1024,
-      });
+      const probe = await this.probeClaudeBareCapability(executable);
+      if (!probe.supportsBare) {
+        return {
+          public: {
+            available: false,
+            source: executable,
+            version: probe.version,
+            reason: `Claude Agent must support --bare (Claude CLI ${CLAUDE_BARE_MINIMUM_VERSION} or newer). Update the CLI, then approve its path again.`,
+          },
+        };
+      }
       return {
         public: {
           available: true,
           source: executable,
-          version: cleanMessage(probe.stdout || probe.stderr, 200),
+          version: probe.version,
         },
         transport: 'cli',
         executable,
@@ -744,6 +806,33 @@ class AIProviders {
     }
   }
 
+  async probeClaudeBareCapability(executable) {
+    const environment = claudeIsolatedEnvironment(this.dataRoot);
+    const versionProbe = await this.runProcess({
+        executable,
+        args: ['--version'],
+        input: '',
+        cwd: this.portableRoot,
+        env: environment,
+        timeoutMs: 5_000,
+        maxOutputBytes: 32 * 1024,
+      });
+    const helpProbe = await this.runProcess({
+      executable,
+      args: ['--help'],
+      input: '',
+      cwd: this.portableRoot,
+      env: environment,
+      timeoutMs: 5_000,
+      maxOutputBytes: 128 * 1024,
+    });
+    const helpText = `${helpProbe.stdout ?? ''}\n${helpProbe.stderr ?? ''}`;
+    return {
+      version: cleanMessage(versionProbe.stdout || versionProbe.stderr, 200),
+      supportsBare: claudeHelpSupportsBare(helpText),
+    };
+  }
+
   async inspectProviders(force = false) {
     const now = Date.now();
     if (this.statusPromise) return this.statusPromise;
@@ -753,13 +842,33 @@ class AIProviders {
 
     this.statusPromise = Promise.all([
       this.inspectCodex(),
+      this.inspectClaude(),
       this.credentialStore?.status?.() ?? Promise.resolve({ providers: {} }),
     ])
-      .then(([codex, credentials]) => {
+      .then(([codex, claudeCli, credentials]) => {
+        const anthropicCredential = credentials.providers?.anthropic;
+        const apiKeyReady = Boolean(
+          anthropicCredential?.configured && anthropicCredential?.decryptable,
+        );
+        const claudeReasons = [];
+        if (!claudeCli.public?.available) {
+          claudeReasons.push(claudeCli.public?.reason || 'Claude Agent executable was not found.');
+        }
+        if (!apiKeyReady) {
+          claudeReasons.push(anthropicCredential?.needsReconnect
+            ? 'The saved Anthropic API key must be reconnected for this Windows user.'
+            : 'Connect an Anthropic API key before using Claude Agent. Subscription credentials are not used.');
+        }
         const claude = {
+          ...claudeCli,
+          transport: 'cli-api-key',
           public: {
-            available: false,
-            reason: 'Public builds use Anthropic API keys instead of Claude subscription credentials.',
+            ...claudeCli.public,
+            available: Boolean(claudeCli.public?.available && apiKeyReady),
+            configured: Boolean(anthropicCredential?.configured),
+            decryptable: Boolean(anthropicCredential?.decryptable),
+            needsReconnect: Boolean(anthropicCredential?.needsReconnect),
+            reason: claudeReasons.length ? claudeReasons.join(' ') : undefined,
           },
         };
         const apiTargets = {};
@@ -860,11 +969,26 @@ class AIProviders {
     }
   }
 
-  async invokeClaude(executable, request, schema, controller) {
+  async invokeClaude(executable, credentials, request, schema, controller) {
+    const model = credentials?.model;
+    if (typeof model !== 'string' || !model.trim() || /[\u0000-\u001f\u007f]/.test(model)) {
+      throw new ProviderError('model_unavailable', 'A valid Anthropic model is required for Claude Agent.');
+    }
+    const capability = await this.probeClaudeBareCapability(executable);
+    if (!capability.supportsBare) {
+      throw new ProviderError(
+        'provider_unavailable',
+        `Claude Agent must support --bare (Claude CLI ${CLAUDE_BARE_MINIMUM_VERSION} or newer).`,
+      );
+    }
+    const environment = claudeApiKeyEnvironment(this.dataRoot, credentials?.apiKey);
     const args = [
+      '--bare',
       '--print',
       '--output-format',
       'json',
+      '--model',
+      model,
       '--no-session-persistence',
       '--tools',
       '',
@@ -887,16 +1011,33 @@ class AIProviders {
     }
 
     const startedAt = Date.now();
-    const result = await runProcess({
-      executable,
-      args,
-      input: request.prompt,
-      cwd: this.portableRoot,
-      env: providerEnvironment(this.dataRoot),
-      timeoutMs: request.timeoutMs,
-      maxOutputBytes: MAX_OUTPUT_BYTES,
-      signal: controller.signal,
-    });
+    let result;
+    try {
+      result = await this.runProcess({
+        executable,
+        args,
+        input: request.prompt,
+        cwd: this.portableRoot,
+        env: environment,
+        timeoutMs: request.timeoutMs,
+        maxOutputBytes: MAX_OUTPUT_BYTES,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      throw new ProviderError(
+        error?.code || 'provider_failed',
+        cleanMessageWithSecret(error?.message, credentials.apiKey),
+      );
+    }
+    if (
+      String(result.stdout ?? '').includes(credentials.apiKey)
+      || String(result.stderr ?? '').includes(credentials.apiKey)
+    ) {
+      throw new ProviderError(
+        'invalid_output',
+        'Claude Agent output contained an API credential and was discarded.',
+      );
+    }
 
     const parsed = parseClaudeJsonOutput(result.stdout);
     if (parsed?.is_error) {
@@ -1214,7 +1355,10 @@ class AIProviders {
         provider = candidate;
         const target = inspected[candidate];
         try {
-          if (API_PROVIDER_IDS.has(candidate)) {
+          if (candidate === 'claude') {
+            const credentials = await this.credentialStore.get('anthropic');
+            result = await this.invokeClaude(target.executable, credentials, request, schema, controller);
+          } else if (API_PROVIDER_IDS.has(candidate)) {
             result = await this.invokeApi(candidate, request, schema, controller);
           } else {
             result = await this.invokeCodexCli(target.executable, request, schemaPath, controller);
@@ -1270,7 +1414,10 @@ function createAIProviders(options) {
 
 module.exports = {
   AIProviders,
+  CLAUDE_BARE_MINIMUM_VERSION,
   EMPTY_CLAUDE_MCP_CONFIG,
+  claudeApiKeyEnvironment,
+  claudeHelpSupportsBare,
   cleanMessage,
   createAIProviders,
   parseClaudeJsonOutput,

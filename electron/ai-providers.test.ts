@@ -6,6 +6,7 @@ const require = createRequire(import.meta.url);
 const {
   AIProviders,
   EMPTY_CLAUDE_MCP_CONFIG,
+  claudeApiKeyEnvironment,
   cleanMessage,
   parseClaudeJsonOutput,
   providerEnvironment,
@@ -13,6 +14,7 @@ const {
 } = require("./ai-providers.cjs") as {
   AIProviders: new (options: Record<string, unknown>) => any;
   EMPTY_CLAUDE_MCP_CONFIG: string;
+  claudeApiKeyEnvironment(dataRoot: string, apiKey: string): Record<string, string>;
   cleanMessage(value: unknown): string;
   parseClaudeJsonOutput(value: unknown): Record<string, unknown>;
   providerEnvironment(dataRoot: string): Record<string, string>;
@@ -133,7 +135,22 @@ function createProvider(fetchImpl: ReturnType<typeof vi.fn>, models: Partial<Rec
   return { providers, credentialStore };
 }
 
-function createCliOverrideProvider(cliPaths?: { codex?: string; claude?: string }) {
+function createClaudeCapabilityProcess(supportsBare = true) {
+  return vi.fn(async ({ args }: { args: string[] }) => {
+    if (args[0] === "--version") {
+      return { stdout: supportsBare ? "2.1.81 (Claude Agent)" : "2.1.80 (Claude Agent)", stderr: "", code: 0 };
+    }
+    if (args[0] === "--help") {
+      return { stdout: supportsBare ? "Usage: claude [options]\n  --bare  Run without local configuration" : "Usage: claude [options]", stderr: "", code: 0 };
+    }
+    throw new Error(`Unexpected CLI probe: ${args.join(" ")}`);
+  });
+}
+
+function createCliOverrideProvider(
+  cliPaths?: { codex?: string; claude?: string },
+  runProcessImpl = createClaudeCapabilityProcess(),
+) {
   return new AIProviders({
     portableRoot: process.cwd(),
     dataRoot: path.join(process.cwd(), ".tmp"),
@@ -144,11 +161,12 @@ function createCliOverrideProvider(cliPaths?: { codex?: string; claude?: string 
     },
     fetchImpl: vi.fn(),
     cliPaths,
+    runProcessImpl,
   });
 }
 
 describe("Claude CLI JSON output", () => {
-  it("uses the empty MCP shape required by Claude Code", () => {
+  it("uses the empty MCP shape required by Claude Agent", () => {
     expect(JSON.parse(EMPTY_CLAUDE_MCP_CONFIG)).toEqual({ mcpServers: {} });
   });
 
@@ -165,7 +183,7 @@ describe("Claude CLI JSON output", () => {
 });
 
 describe("CLI executable overrides", () => {
-  it("prioritizes an explicit Codex executable and keeps Claude subscription routing disabled", async () => {
+  it("prioritizes explicit CLI executables but keeps Claude unavailable without an API key", async () => {
     const executable = path.resolve(process.execPath);
     const providers = createCliOverrideProvider({ codex: executable, claude: executable });
 
@@ -174,9 +192,84 @@ describe("CLI executable overrides", () => {
 
     expect(status.codex).toMatchObject({ available: true, source: executable });
     expect(status.claude).toMatchObject({ available: false });
-    expect(status.claude.reason).toContain("API keys");
+    expect(status.claude.reason).toContain("Anthropic API key");
     expect(inspectedCodex).toMatchObject({ transport: "cli", executable });
     expect(status.codex.source).not.toContain("@openai/codex-sdk");
+  });
+
+  it("enables the Claude Agent executable only when the saved Anthropic key is usable", async () => {
+    const executable = path.resolve(process.execPath);
+    const providers = new AIProviders({
+      portableRoot: process.cwd(),
+      dataRoot: path.join(process.cwd(), ".tmp", "claude-status"),
+      schemasRoot: path.join(process.cwd(), "schemas"),
+      credentialStore: {
+        status: vi.fn(async () => ({
+          providers: {
+            anthropic: { configured: true, decryptable: true, model: "claude-sonnet-5" },
+          },
+        })),
+      },
+      fetchImpl: vi.fn(),
+      cliPaths: { codex: executable, claude: executable },
+      runProcessImpl: createClaudeCapabilityProcess(),
+    });
+
+    const status = await providers.status();
+
+    expect(status.claude).toMatchObject({
+      available: true,
+      configured: true,
+      decryptable: true,
+      source: executable,
+    });
+    expect(status.claude.reason).toBeUndefined();
+  });
+
+  it("fails closed when an approved Claude CLI does not support bare mode", async () => {
+    const executable = path.resolve(process.execPath);
+    const providers = new AIProviders({
+      portableRoot: process.cwd(),
+      dataRoot: path.join(process.cwd(), ".tmp", "claude-old-version"),
+      schemasRoot: path.join(process.cwd(), "schemas"),
+      credentialStore: {
+        status: vi.fn(async () => ({
+          providers: {
+            anthropic: { configured: true, decryptable: true, model: "claude-sonnet-5" },
+          },
+        })),
+      },
+      fetchImpl: vi.fn(),
+      cliPaths: { claude: executable },
+      runProcessImpl: createClaudeCapabilityProcess(false),
+    });
+
+    const status = await providers.status();
+
+    expect(status.claude).toMatchObject({ available: false, source: executable });
+    expect(status.claude.reason).toContain("--bare");
+    expect(status.claude.reason).toContain("2.1.81");
+  });
+
+  it("reports an auto-detected Claude CLI without authorizing it to receive a key", async () => {
+    const executable = path.resolve(process.execPath);
+    const runProcessImpl = createClaudeCapabilityProcess();
+    const providers = new AIProviders({
+      portableRoot: process.cwd(),
+      dataRoot: path.join(process.cwd(), ".tmp", "claude-detected-only"),
+      schemasRoot: path.join(process.cwd(), "schemas"),
+      credentialStore: { status: vi.fn(async () => ({ providers: {} })) },
+      fetchImpl: vi.fn(),
+      runProcessImpl,
+    });
+    providers.resolveClaudePath = vi.fn(() => executable);
+
+    const inspected = await providers.inspectClaude();
+
+    expect(inspected.public).toMatchObject({ available: false, source: executable });
+    expect(inspected.public.reason).toContain("not approved");
+    expect(inspected.executable).toBeUndefined();
+    expect(runProcessImpl).not.toHaveBeenCalled();
   });
 
   it("keeps an explicit missing override authoritative instead of silently falling back", async () => {
@@ -240,20 +333,39 @@ describe("API provider routing", () => {
     }
   });
 
-  it("accepts all supported API provider ids", () => {
-    for (const provider of ["openai", "anthropic", "deepseek"]) {
+  it("builds a Claude environment with only the explicit key and an isolated config directory", () => {
+    const previousAnthropic = process.env.ANTHROPIC_API_KEY;
+    const previousOAuth = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const previousCloudAuth = process.env.AWS_ACCESS_KEY_ID;
+    process.env.ANTHROPIC_API_KEY = "test-ambient-anthropic-secret";
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "test-subscription-oauth-secret";
+    process.env.AWS_ACCESS_KEY_ID = "test-cloud-auth-secret";
+    const dataRoot = path.join(process.cwd(), ".tmp", "claude-environment");
+    try {
+      const environment = claudeApiKeyEnvironment(dataRoot, "test-explicit-anthropic-secret");
+      expect(environment.ANTHROPIC_API_KEY).toBe("test-explicit-anthropic-secret");
+      expect(environment.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+      expect(environment.AWS_ACCESS_KEY_ID).toBeUndefined();
+      expect(environment.CLAUDE_CONFIG_DIR).toBe(path.join(dataRoot, "providers", "claude-api-key-only"));
+      expect(environment.CLAUDE_CONFIG_DIR).not.toBe(path.join(process.env.USERPROFILE ?? "", ".claude"));
+    } finally {
+      if (previousAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAnthropic;
+      if (previousOAuth === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      else process.env.CLAUDE_CODE_OAUTH_TOKEN = previousOAuth;
+      if (previousCloudAuth === undefined) delete process.env.AWS_ACCESS_KEY_ID;
+      else process.env.AWS_ACCESS_KEY_ID = previousCloudAuth;
+    }
+  });
+
+  it("accepts all supported provider ids", () => {
+    for (const provider of ["claude", "openai", "anthropic", "deepseek"]) {
       expect(validateInvokeRequest({ provider, operation: "lesson", schemaName: "lesson", prompt: "teach" }).provider)
         .toBe(provider);
     }
   });
 
-  it("rejects the disabled Claude provider and its legacy cost cap", () => {
-    expect(() => validateInvokeRequest({
-      provider: "claude",
-      operation: "lesson",
-      schemaName: "lesson",
-      prompt: "teach",
-    })).toThrow("Unsupported AI provider");
+  it("rejects the legacy per-call cost cap", () => {
     expect(() => validateInvokeRequest({
       provider: "auto",
       operation: "lesson",
@@ -261,6 +373,179 @@ describe("API provider routing", () => {
       prompt: "teach",
       budgetUsd: 1,
     })).toThrow("budgetUsd is not supported");
+  });
+
+  it("invokes Claude CLI with the saved Anthropic key, selected model, and structured output", async () => {
+    const dataRoot = path.join(process.cwd(), ".tmp", "claude-invoke");
+    const runProcessImpl = vi.fn(async ({ args }: { args: string[] }) => {
+      if (args[0] === "--version") return { stdout: "2.1.81 (Claude Agent)", stderr: "", code: 0 };
+      if (args[0] === "--help") return { stdout: "Usage: claude [options]\n  --bare  Run without local configuration", stderr: "", code: 0 };
+      return {
+        stdout: JSON.stringify({
+          type: "result",
+          result: JSON.stringify(lesson),
+          structured_output: lesson,
+          usage: { input_tokens: 40, output_tokens: 20 },
+        }),
+        stderr: "",
+        code: 0,
+      };
+    });
+    const credentialStore = {
+      get: vi.fn(async (provider: string) => {
+        expect(provider).toBe("anthropic");
+        return { apiKey: "test-explicit-anthropic-secret", model: "claude-sonnet-5" };
+      }),
+    };
+    const providers = new AIProviders({
+      portableRoot: process.cwd(),
+      dataRoot,
+      schemasRoot: path.join(process.cwd(), "schemas"),
+      credentialStore,
+      fetchImpl: vi.fn(),
+      runProcessImpl,
+    });
+    providers.inspectProviders = vi.fn(async () => ({
+      codex: { public: { available: false } },
+      claude: {
+        public: { available: true },
+        transport: "cli-api-key",
+        executable: path.resolve(process.execPath),
+      },
+      openai: { public: { available: false } },
+      anthropic: { public: { available: false } },
+      deepseek: { public: { available: false } },
+    }));
+
+    const result = await providers.invoke({
+      provider: "claude",
+      operation: "lesson",
+      schemaName: "lesson",
+      prompt: "teach me",
+    });
+
+    expect(result).toMatchObject({ ok: true, provider: "claude", data: lesson });
+    expect(credentialStore.get).toHaveBeenCalledWith("anthropic");
+    expect(runProcessImpl).toHaveBeenCalledTimes(3);
+    const processInput = runProcessImpl.mock.calls.find(([input]) => input.args.includes("--print"))?.[0];
+    expect(processInput).toBeDefined();
+    expect(processInput.args).toEqual(expect.arrayContaining([
+      "--bare",
+      "--model", "claude-sonnet-5",
+      "--output-format", "json",
+      "--json-schema",
+      "--setting-sources", "",
+    ]));
+    expect(processInput.env.ANTHROPIC_API_KEY).toBe("test-explicit-anthropic-secret");
+    expect(processInput.env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    expect(processInput.env.CLAUDE_CONFIG_DIR).toBe(path.join(dataRoot, "providers", "claude-api-key-only"));
+    for (const [probeInput] of runProcessImpl.mock.calls.filter(([input]) => input.args[0] === "--version" || input.args[0] === "--help")) {
+      expect(probeInput.env.ANTHROPIC_API_KEY).toBeUndefined();
+    }
+    expect(JSON.stringify(result)).not.toContain("test-explicit-anthropic-secret");
+  });
+
+  it("never falls back to ambient Claude credentials when the Anthropic key is absent", async () => {
+    const previousAnthropic = process.env.ANTHROPIC_API_KEY;
+    const previousOAuth = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    process.env.ANTHROPIC_API_KEY = "test-ambient-key-must-not-be-used";
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "test-oauth-must-not-be-used";
+    const runProcessImpl = vi.fn();
+    const providers = new AIProviders({
+      portableRoot: process.cwd(),
+      dataRoot: path.join(process.cwd(), ".tmp", "claude-no-key"),
+      schemasRoot: path.join(process.cwd(), "schemas"),
+      credentialStore: {
+        get: vi.fn(async () => { throw new Error("Anthropic API key is not configured."); }),
+      },
+      fetchImpl: vi.fn(),
+      runProcessImpl,
+    });
+    providers.inspectProviders = vi.fn(async () => ({
+      claude: { public: { available: true }, executable: path.resolve(process.execPath) },
+    }));
+    try {
+      const result = await providers.invoke({
+        provider: "claude",
+        operation: "lesson",
+        schemaName: "lesson",
+        prompt: "teach me",
+      });
+      expect(result).toMatchObject({ ok: false, provider: "claude", error: "Anthropic API key is not configured." });
+      expect(runProcessImpl).not.toHaveBeenCalled();
+    } finally {
+      if (previousAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAnthropic;
+      if (previousOAuth === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      else process.env.CLAUDE_CODE_OAUTH_TOKEN = previousOAuth;
+    }
+  });
+
+  it("discards Claude output that echoes the exact API credential", async () => {
+    const apiKey = "test-explicit-secret-that-must-not-escape";
+    const runProcessImpl = vi.fn(async ({ args }: { args: string[] }) => {
+      if (args[0] === "--version") return { stdout: "2.1.81 (Claude Agent)", stderr: "", code: 0 };
+      if (args[0] === "--help") return { stdout: "--bare", stderr: "", code: 0 };
+      return { stdout: JSON.stringify({ type: "result", result: apiKey }), stderr: "", code: 0 };
+    });
+    const providers = new AIProviders({
+      portableRoot: process.cwd(),
+      dataRoot: path.join(process.cwd(), ".tmp", "claude-secret-output"),
+      schemasRoot: path.join(process.cwd(), "schemas"),
+      credentialStore: {
+        get: vi.fn(async () => ({ apiKey, model: "claude-sonnet-5" })),
+      },
+      fetchImpl: vi.fn(),
+      runProcessImpl,
+    });
+    providers.inspectProviders = vi.fn(async () => ({
+      claude: { public: { available: true }, executable: path.resolve(process.execPath) },
+    }));
+
+    const result = await providers.invoke({
+      provider: "claude",
+      operation: "lesson",
+      schemaName: "lesson",
+      prompt: "teach me",
+    });
+
+    expect(result).toMatchObject({ ok: false, provider: "claude" });
+    expect(result.error).toContain("credential");
+    expect(JSON.stringify(result)).not.toContain(apiKey);
+  });
+
+  it("never routes automatic requests through a local Claude executable", async () => {
+    const fetchImpl = vi.fn();
+    const { providers, credentialStore } = createProvider(fetchImpl);
+    providers.inspectProviders = vi.fn(async () => ({
+      codex: { public: { available: false } },
+      claude: { public: { available: true }, executable: "claude.exe" },
+      openai: { public: { available: true }, transport: "api" },
+      anthropic: { public: { available: true }, transport: "api" },
+      deepseek: { public: { available: true }, transport: "api" },
+    }));
+    providers.invokeClaude = vi.fn(async () => ({
+      text: JSON.stringify(lesson),
+      data: lesson,
+      usage: {},
+    }));
+    providers.invokeApi = vi.fn(async (provider: string) => {
+      expect(provider).toBe("openai");
+      return { text: JSON.stringify(lesson), data: lesson, usage: {} };
+    });
+
+    const result = await providers.invoke({
+      provider: "auto",
+      operation: "lesson",
+      schemaName: "lesson",
+      prompt: "teach me",
+    });
+
+    expect(result).toMatchObject({ ok: true, provider: "openai", data: lesson });
+    expect(credentialStore.get).not.toHaveBeenCalled();
+    expect(providers.invokeClaude).not.toHaveBeenCalled();
+    expect(providers.invokeApi).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("uses OpenAI Responses structured output without exposing the key", async () => {

@@ -354,7 +354,7 @@ async function useDefaultDataRoot() {
 }
 
 function validateCliProvider(provider) {
-  if (provider !== 'codex') {
+  if (!['codex', 'claude'].includes(provider)) {
     throw new TypeError('Unsupported CLI provider.');
   }
   return provider;
@@ -363,10 +363,12 @@ function validateCliProvider(provider) {
 async function pickCliExecutable(providerInput) {
   try {
     const provider = validateCliProvider(providerInput);
+    const displayName = provider === 'claude' ? 'Claude Agent CLI' : 'Codex CLI';
+    const detectedClaudePath = provider === 'claude' ? aiProviders.resolveClaudePath() : null;
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: 'Codex CLI 실행 파일 선택',
+      title: `${displayName} 실행 파일 선택`,
       buttonLabel: '이 실행 파일 사용',
-      defaultPath: portableConfig.cliPaths[provider] ?? portableRoot,
+      defaultPath: portableConfig.cliPaths[provider] ?? detectedClaudePath ?? portableRoot,
       properties: ['openFile', 'dontAddToRecent'],
       filters: [{ name: 'Windows 실행 파일', extensions: ['exe', 'com'] }],
     });
@@ -376,7 +378,21 @@ async function pickCliExecutable(providerInput) {
     if (linkStats.isSymbolicLink() || !linkStats.isFile()) {
       throw new TypeError('CLI 경로는 실제 실행 파일이어야 합니다.');
     }
-    const cliPaths = { ...portableConfig.cliPaths, [provider]: await fs.promises.realpath(selected) };
+    const realSelected = await fs.promises.realpath(selected);
+    if (provider === 'claude') {
+      const confirmation = await dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        buttons: ['승인하고 사용', '취소'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+        title: 'Claude Agent 실행 파일 승인',
+        message: '이 실행 파일에 Anthropic API 키 전달을 승인할까요?',
+        detail: `${realSelected}\n\nStudyQuest에서 Claude Agent를 직접 선택한 경우에만 저장된 Anthropic API 키가 이 프로세스에 전달됩니다. Anthropic이 배포한 공식 CLI인지 확인하세요.`,
+      });
+      if (confirmation.response !== 0) return { ok: false, canceled: true };
+    }
+    const cliPaths = { ...portableConfig.cliPaths, [provider]: realSelected };
     await savePortableConfig(portableRoot, portableConfigInput({ cliPaths }), process.env);
     schedulePortableRelaunch();
     return { ok: true, restarting: true };

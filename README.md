@@ -4,7 +4,7 @@
 
 배우고 싶은 과목과 목표를 대화로 설명하면 StudyQuest가 수행형 진단을 만들고, 답안을 바탕으로 스킬 관계 그래프와 7일 커리큘럼을 구성합니다. 각 퀘스트는 읽기 강의, 대화형 실험실, 마지막 확인 문제로 이어집니다.
 
-> 현재 버전은 초기 개발 단계의 `0.1.0`이며 Windows x64와 한국어 중심 UI를 대상으로 합니다.
+> 현재 버전은 초기 개발 단계의 `0.1.1`이며 Windows x64와 한국어 중심 UI를 대상으로 합니다.
 
 ## 화면과 학습 흐름
 
@@ -48,7 +48,7 @@
 - 영어 등 음성 답변의 녹음·재생과 선택적 OpenAI 전사
 - 라이트·다크 모드
 - 호출별 공급자, 토큰, 비용 사용 이력
-- Codex 및 BYOK API 공급자, Codex 실행 경로, 데이터 저장 위치 설정
+- Codex, Claude Agent 및 BYOK API 공급자와 CLI 실행 경로, 데이터 저장 위치 설정
 
 ## 설치
 
@@ -58,6 +58,12 @@
 2. ZIP을 쓰기 가능한 별도 폴더에 압축 해제합니다.
 3. 압축을 푼 폴더의 `StudyQuest.cmd`를 실행합니다.
 4. `AI와 설정` 화면에서 사용할 공급자가 인식되는지 확인합니다.
+
+Claude Agent는 선택 기능입니다. 사용하려면 Anthropic이 배포하는 Claude CLI를 사용자가
+별도로 설치하고, StudyQuest 설정에서 감지된 실행 파일 또는 직접 찾은 실행 파일의 정확한
+경로를 승인해야 합니다. 자동 감지만으로는 실행하거나 API 키를 전달하지 않습니다.
+StudyQuest는 Claude CLI를 번들하거나 자동 설치하지 않습니다. CLI 경로를 승인하고
+사용자의 Anthropic API 키를 저장한 뒤 AI 라우팅에서 Claude Agent를 직접 선택해야 합니다.
 
 현재 빌드는 설치 프로그램이나 자동 업데이트를 사용하지 않는 포터블 앱입니다. `Program Files` 같은 시스템 폴더보다 사용자 문서 또는 별도 앱 폴더에 압축을 푸는 것을 권장합니다.
 
@@ -89,19 +95,20 @@ npm.cmd run package:portable
 
 ## AI 공급자 연결
 
-![Codex 및 BYOK API 라우팅 설정](docs/screenshots/settings.png)
+![AI 공급자와 BYOK API 라우팅 설정](docs/screenshots/settings.png)
 
 `AI와 설정`에서 자동 라우팅 또는 특정 공급자를 선택합니다.
 
 | 공급자 | 연결 방식 | 필요한 준비 |
 | --- | --- | --- |
-| 자동 라우팅 | 사용 가능한 공급자를 순서대로 시도 | 아래 공급자 중 하나 이상 |
+| 자동 라우팅 | 사용 가능한 공급자를 순서대로 시도 | Codex·OpenAI·Claude API·DeepSeek 중 하나 이상 |
 | Codex CLI | `@openai/codex-sdk` 앱 통합과 Codex 실행 경로 | 사용자가 별도로 완료한 Codex 인증 |
+| Claude Agent | 사용자가 설치한 로컬 Claude CLI | Claude CLI 실행 경로와 사용자의 Anthropic API 키 |
 | OpenAI API | HTTPS API | 사용자의 OpenAI API 키 |
 | Claude API | Anthropic BYOK HTTPS API | 사용자의 Anthropic API 키 |
 | DeepSeek API | HTTPS API | 사용자의 DeepSeek API 키 |
 
-자동 라우팅은 현재 사용 가능한 공급자 중 Codex CLI, OpenAI API, Claude API, DeepSeek API 순으로 시도합니다. 앞 공급자가 인증·요율 제한·일시 장애 등으로 실패하면 지원되는 오류에 한해 다음 공급자로 넘어갑니다.
+자동 라우팅은 현재 사용 가능한 공급자 중 Codex CLI, OpenAI API, Claude API, DeepSeek API 순으로 시도합니다. 앞 공급자가 인증·요율 제한·일시 장애 등으로 실패하면 지원되는 오류에 한해 다음 공급자로 넘어갑니다. 로컬 실행 파일에 키가 예기치 않게 전달되지 않도록 Claude Agent는 자동 라우팅에 포함하지 않으며, 사용자가 설정에서 Claude Agent를 직접 선택한 경우에만 호출합니다.
 
 ### Codex CLI
 
@@ -116,9 +123,25 @@ StudyQuest는 Codex를 전역 설치하거나 사용자의 인증 파일을 수�
 
 Codex는 임시 세션, 읽기 전용 샌드박스, 웹 검색 비활성화 상태로 호출합니다.
 
+### Claude Agent
+
+- Claude Agent는 사용자가 별도로 설치한 로컬 Claude CLI를 StudyQuest의 비대화형 AI 백엔드로 호출하는 선택 기능입니다.
+- 설정은 Claude CLI 설치 위치를 감지해 보여줄 수 있지만, 사용자가 정확한 실행 파일 경로를 승인하기 전에는 실행하지 않습니다. 승인 화면에는 키가 전달될 실제 경로가 표시됩니다.
+- 사용자가 StudyQuest에 저장한 개인 Anthropic API 키가 반드시 필요합니다. CLI 설치 또는 기존 로그인만으로는 활성화되지 않습니다.
+- AI 라우팅에서 Claude Agent를 직접 선택해야 하며, 기본 자동 라우팅은 Claude Agent를 호출하지 않습니다.
+- StudyQuest는 호출할 때 해당 키를 자식 프로세스의 `ANTHROPIC_API_KEY` 환경 변수로만 전달하며, 명령줄 인수에는 넣지 않습니다.
+- Claude CLI는 현재 데이터 루트 아래의 격리된 전용 설정 디렉터리와 `--bare` 모드로 실행됩니다. Claude 구독 OAuth, 기존 Claude 로그인, hooks, plugins, MCP, `CLAUDE.md` 또는 세션 토큰을 읽거나 대신 사용하지 않으며, API 키가 없으면 호출을 차단합니다.
+- 안전한 `--bare` 모드가 있는 Claude CLI `2.1.81` 이상이 필요합니다. StudyQuest는 실행 전 기능 지원 여부를 다시 검사하고, 구버전이면 업데이트 안내와 함께 닫힌 상태로 실패합니다. 자세한 동작은 Anthropic의 [Headless mode 안내](https://code.claude.com/docs/en/headless)를 참고하세요.
+- 승인된 경로를 해제하면 Claude Agent는 즉시 비활성화되며, 다시 승인하기 전까지 자동 감지된 CLI에 키를 전달하지 않습니다.
+- StudyQuest는 Claude CLI를 설치·업데이트·제거하거나 CLI의 인증 파일을 수정하지 않습니다. CLI 자체의 설치와 라이선스는 사용자가 Anthropic의 공식 안내에 따라 별도로 관리합니다.
+
+이 연결 경계는 제3자 제품에서 Free·Pro·Max 구독 자격을 중계하지 말고 API 키 인증을 사용하도록 안내하는 Anthropic의 [Legal and compliance 안내](https://code.claude.com/docs/en/legal-and-compliance)에 맞춘 것입니다.
+
 ### Claude API
 
-공개 배포판의 Claude 연결은 사용자가 직접 입력한 개인 Anthropic API 키를 사용하는 BYOK 방식만 지원합니다. Claude 구독의 OAuth 자격을 대신 사용하거나 다른 사용자에게 중계하지 않습니다. 이 경계는 Anthropic의 [Legal and compliance 안내](https://code.claude.com/docs/en/legal-and-compliance)에 맞춘 것입니다.
+Claude API는 로컬 CLI를 거치지 않고 Anthropic HTTPS API에 직접 연결합니다. 이 방식도 사용자가 직접 입력한 개인 Anthropic API 키를 사용하는 BYOK 연결이며, Claude 구독의 OAuth 자격을 대신 사용하거나 다른 사용자에게 중계하지 않습니다.
+
+Claude Agent와 Claude API는 설정에 저장된 동일한 Anthropic API 키와 모델을 공유합니다. 연결 방식을 바꿀 때 키를 중복 저장할 필요는 없으며, 두 방식의 호출 비용은 모두 해당 Anthropic API 계정에 적용됩니다.
 
 ### 직접 API 연결
 
@@ -126,11 +149,11 @@ OpenAI, Anthropic, DeepSeek는 사용자가 API 키와 모델 이름을 직접 �
 
 - API 키는 일반 학습 상태와 분리합니다.
 - Electron `safeStorage`로 현재 Windows 사용자에게 묶인 암호문을 저장합니다.
-- 저장한 키를 Codex CLI에 전달하지 않습니다.
+- Anthropic API 키는 사용자가 실행 파일 경로를 승인하고 AI 라우팅에서 Claude Agent를 직접 선택한 경우에만 해당 Claude CLI 자식 프로세스에 전달합니다. Codex CLI나 다른 외부 프로그램에는 전달하지 않습니다.
 - 다른 PC나 다른 Windows 사용자에게 데이터 폴더를 옮기면 API 키를 다시 입력해야 합니다.
 - 저장, 연결 확인, 연결 삭제를 설정 화면에서 수행할 수 있습니다.
 
-Codex 사용 한도와 OpenAI·Anthropic·DeepSeek API 호출 비용은 각 사용자 계정에 적용됩니다. StudyQuest의 월간 토큰 예산은 화면 표시용 기준이며 공급자 계정의 실제 한도를 제한하지 않습니다. 정확한 사용량과 청구액은 각 공급자의 관리 화면에서 확인하세요.
+Codex 사용 한도와 OpenAI·Anthropic·DeepSeek API 호출 비용은 각 사용자 계정에 적용됩니다. Claude Agent도 사용자가 제공한 Anthropic API 키로 호출되므로 해당 API 계정에 비용이 청구됩니다. StudyQuest의 월간 토큰 예산은 화면 표시용 기준이며 공급자 계정의 실제 한도를 제한하지 않습니다. 정확한 사용량과 청구액은 각 공급자의 관리 화면에서 확인하세요.
 
 ## 학습 자료와 음성의 전송 범위
 
@@ -160,6 +183,7 @@ StudyQuest/
 └─ data/
    ├─ state/
    ├─ credentials/
+   ├─ providers/
    ├─ userData/
    ├─ sessionData/
    ├─ cache/
@@ -173,7 +197,8 @@ StudyQuest/
 - 변경은 앱 재시작 후 적용됩니다.
 - 기존 데이터는 자동으로 이동하거나 삭제하지 않습니다.
 - 드라이브 루트와 Windows 시스템 디렉터리는 데이터 위치로 선택할 수 없습니다.
-- 사용자가 지정한 Codex 실행 경로와 데이터 위치는 포터블 설정 파일에 저장하지만, 이 파일에는 비밀 값을 넣을 수 없도록 검증합니다.
+- `providers/`에는 Claude Agent 같은 외부 실행기의 격리된 앱 전용 설정이 저장되며, API 키는 `credentials/`의 Windows 사용자 전용 암호문과 분리됩니다.
+- 사용자가 지정한 Codex·Claude CLI 실행 경로와 데이터 위치는 포터블 설정 파일에 저장하지만, 이 파일에는 비밀 값을 넣을 수 없도록 검증합니다.
 - 학습 상태 초기화는 과목·진단·커리큘럼을 비우며 Codex 인증은 건드리지 않습니다.
 
 StudyQuest는 레지스트리, 시작 프로그램, Windows 서비스 또는 `Program Files` 설치 항목을 만들지 않습니다. 다만 Windows는 Prefetch, Defender, 이벤트 기록 같은 운영체제 차원의 흔적을 자체적으로 만들 수 있습니다.
@@ -226,8 +251,8 @@ npm.cmd run package:portable
 - 한국어 중심 UI입니다.
 - AI 기능에는 인터넷 연결과 공급자 인증이 필요합니다.
 - 생성된 설명, 수식, 코드, 채점은 틀릴 수 있으며 전문 서적·연구·시험·업무에 사용하기 전에 검증해야 합니다.
-- 공급자의 모델, API 또는 Codex 출력 형식 변경으로 호환성 문제가 생길 수 있습니다.
-- Codex 실행 구성 탐지만으로 인증 상태를 완전히 사전 검증하지 못합니다.
+- 공급자의 모델, API 또는 CLI 출력 형식 변경으로 호환성 문제가 생길 수 있습니다.
+- Codex·Claude CLI 실행 구성 탐지만으로 인증 상태를 완전히 사전 검증하지 못합니다.
 - 음성 자동 전사는 OpenAI API 연결이 필요합니다.
 - `.doc`, `.hwp`, `.hwpx`, 이미지 OCR은 지원하지 않습니다.
 - 데이터 위치 변경 시 기존 데이터를 자동 마이그레이션하지 않습니다.
