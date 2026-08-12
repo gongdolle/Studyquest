@@ -27,7 +27,7 @@
   "dependencies": {
     "@openai/codex-sdk": "0.146.0",
     "ajv": "8.20.0",
-    "lucide-react": "1.28.0",
+    "lucide-react": "1.30.0",
     "officeparser": "7.5.1",
     "react": "19.2.8",
     "react-dom": "19.2.8"
